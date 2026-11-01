@@ -8,8 +8,11 @@ Turns your gameplay clips into YouTube videos and uploads them to
 1. Finds new clips in your recorder folders (Mobalytics, Medal, NVIDIA, Xbox Game Bar).
 2. Makes a **vertical Short** (1080×1920, blurred background, last 58 seconds of the clip, which is where the big play usually is).
 3. On your chosen weekday, makes a **best-of compilation** (1080p, fades between clips, chapter timestamps, thumbnail).
-4. Writes the title, description and hashtags. Titles rotate so the channel doesn't look copy-pasted.
-5. Uploads each video as private and schedules it to go public at your set time.
+4. Makes a **bold thumbnail**: the most action-packed frame, punched-up colors, huge slanted text
+   (white line + red punchline like "WHO DID / THIS?!"), a red arrow and circle on the action,
+   the game name at the bottom and a red edge glow.
+5. Writes the title, description and hashtags. Titles rotate so the channel doesn't look copy-pasted.
+6. Uploads each video as private and schedules it to go public at your set time.
 
 Clips you put in the **MuffinPop Favorites** folder are used first.
 
@@ -85,6 +88,20 @@ Register-ScheduledTask -TaskName "MuffinPop Daily" -Action $action -Trigger $tri
 - YouTube can refuse to monetize channels that pump out identical videos with no human input. Every week, drop a few hand-picked clips in the Favorites folder, and now and then add a voice line or caption in your own words.
 - Use royalty-free music only (Studio → **Audio library**). Set `music_file` in `config.yaml`.
 - Mute or skip clips with copyrighted music playing in the background. Content ID will claim them.
+
+## Thumbnails
+
+Try the look on any clip:
+
+```powershell
+python thumbnails.py "C:\path\to\clip.mp4" --text "NO|WAY?!" --game Valorant
+python thumbnails.py "C:\path\to\clip.mp4" --text "WHAT DID|I DO?!" --vertical
+```
+
+The `|` splits the white top line from the red punchline. Edit the phrase lists `SHORT_TEXT` and
+`COMP_TEXT` at the top of `thumbnails.py` to change what it says. On Windows it uses the Impact font.
+
+Custom thumbnails need a verified channel: verify your phone at <https://www.youtube.com/verify>.
 
 ## Branding
 

@@ -29,6 +29,8 @@ from pathlib import Path
 
 import yaml
 
+import thumbnails
+
 HERE = Path(__file__).resolve().parent
 STATE_FILE = HERE / "state.json"
 CONFIG_FILE = HERE / "config.yaml"
@@ -252,12 +254,18 @@ def build_short(cfg: dict, state: dict, cid: str, clip: dict) -> dict:
             "-filter_complex", vf, "-map", "[v]", "-map", amap,
             "-c:v", "libx264", "-preset", "medium", "-crf", "20",
             "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-shortest", "-movflags", "+faststart", str(out)])
+    thumb = out.with_suffix(".jpg")
+    try:
+        thumbnails.make_thumbnail(out, thumb, thumbnails.pick_text("short"), clip["game"], vertical=True)
+    except Exception as e:  # a thumbnail problem should never stop the video
+        log(f"Thumbnail skipped: {e}")
+        thumb = None
     recent = [v.get("template") for v in state["videos"][-6:]]
     template, title = pick_title(SHORT_TITLES, recent, game=clip["game"])
     desc = (f"{clip['game']} highlight from MuffinPop 🧁💥\n\n"
             f"Subscribe for daily gaming highlights!\n\n"
             f"#shorts {hashtag(clip['game'])} #gaming #highlights")
-    return {"kind": "short", "file": str(out), "title": title, "template": template,
+    return {"kind": "short", "file": str(out), "thumbnail": str(thumb) if thumb else None, "title": title, "template": template,
             "description": desc, "tags": [clip["game"], "shorts"], "clips": [cid],
             "publish_at": next_publish(cfg["shorts"].get("publish_time", "17:00")).isoformat(),
             "uploaded": False}
@@ -294,11 +302,13 @@ def build_compilation(cfg: dict, state: dict, clips: list[tuple[str, dict]]) -> 
                 "-movflags", "+faststart", str(out)])
     else:
         ffmpeg(["-f", "concat", "-safe", "0", "-i", str(listing), "-c", "copy", "-movflags", "+faststart", str(out)])
-    # Thumbnail from the middle of the first (best) clip.
+    # Thumbnail from the first (best) clip.
     thumb = out.with_suffix(".jpg")
     try:
-        ffmpeg(["-ss", f"{clips[0][1]['duration'] / 2:.2f}", "-i", str(out), "-frames:v", "1", "-q:v", "2", str(thumb)])
-    except RuntimeError:
+        thumbnails.make_thumbnail(clips[0][1]["path"], thumb, thumbnails.pick_text("compilation", len(clips)),
+                                  clips[0][1]["game"])
+    except Exception as e:
+        log(f"Thumbnail skipped: {e}")
         thumb = None
     shutil.rmtree(work, ignore_errors=True)
 
