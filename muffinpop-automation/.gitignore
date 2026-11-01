@@ -1,0 +1,7 @@
+config.yaml
+client_secret*.json
+token.json
+state.json
+output/
+work/
+__pycache__/

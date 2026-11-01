@@ -1,0 +1,64 @@
+# Copy this file to config.yaml and edit the paths for your PC.
+
+channel_name: MuffinPop
+channel_id: UCfbpVj3UB5pQ4hUFfwcvTaQ
+
+# Every folder your recorders save clips into. Subfolders are scanned too.
+# Remove any you don't use. %APPDATA% and %USERPROFILE% work here.
+clip_folders:
+  - "%APPDATA%/Mobalytics/highlights"
+  - "%USERPROFILE%/Videos/Medal"
+  - "%USERPROFILE%/Videos/NVIDIA"
+  - "%USERPROFILE%/Videos/Captures"        # Xbox Game Bar
+
+# Drop your best clips here and they get used first.
+favorites_folder: "%USERPROFILE%/Videos/MuffinPop Favorites"
+
+# Where finished videos are written before uploading.
+output_folder: "./output"
+
+# Clips shorter than this (seconds) are ignored.
+min_clip_seconds: 5
+
+shorts:
+  enabled: true
+  per_day: 1
+  max_seconds: 58          # YouTube Shorts must be under 60s
+  publish_time: "17:00"    # local time to go public
+
+compilation:
+  enabled: true
+  weekday: sunday          # day the weekly best-of is built
+  min_clips: 5
+  max_clips: 15
+  publish_time: "12:00"
+
+upload:
+  enabled: true
+  # Videos upload as private and go public at publish_time.
+  category_id: "20"        # 20 = Gaming
+  made_for_kids: false
+  default_tags: [gaming, highlights, gameplay, clutch, MuffinPop]
+
+# Optional background music for compilations (royalty-free!). Leave blank for none.
+# Grab tracks from YouTube Studio > Audio library.
+music_file: ""
+music_volume: 0.15
+
+# Map words in a clip's folder or file name to a nicer game name.
+# Anything not listed uses the folder name as-is.
+game_names:
+  league: League of Legends
+  lol: League of Legends
+  valorant: Valorant
+  fortnite: Fortnite
+  apex: Apex Legends
+  cs2: Counter-Strike 2
+  counter-strike: Counter-Strike 2
+  overwatch: Overwatch 2
+  rocket: Rocket League
+  minecraft: Minecraft
+  warzone: Call of Duty Warzone
+  tft: Teamfight Tactics
+  marvel: Marvel Rivals
+  deadlock: Deadlock
