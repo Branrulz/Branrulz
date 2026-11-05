@@ -12,61 +12,83 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%230b0a08'/><text x='50' y='72' font-size='70' text-anchor='middle' fill='%23c9a961' font-family='Georgia,serif'>B</text></svg>">
 </head>
 <body>
-  <header class="hero">
+  <header class="topbar">
     <div class="wrap">
       <nav>
-        <span class="logo"><span class="logo-mark">BillDrop</span><span class="eyebrow">The Private Ledger</span></span>
-        <button class="btn btn-ghost" data-open="post-dialog">Submit a bill</button>
+        <a href="#/" class="logo"><span class="logo-mark">BillDrop</span><span class="eyebrow">The Private Ledger</span></a>
+        <div class="nav-actions" id="nav-actions"></div>
       </nav>
-      <span class="eyebrow">Est. 2026 &nbsp;·&nbsp; By invitation only*</span>
-      <h1>Some fortunes are made. <em>Others are spent beautifully.</em></h1>
-      <p class="sub">A private ledger of real bills from real people. Settle one with a single gesture — paid directly to the biller, recorded among the Patrons' Circle.</p>
-      <div class="stats" id="stats">
-        <div><strong id="stat-paid">$0</strong><span>Settled by patrons</span></div>
-        <div><strong id="stat-count">0</strong><span>Accounts closed</span></div>
-        <div><strong id="stat-need">$0</strong><span>Awaiting a patron</span></div>
-      </div>
     </div>
   </header>
 
-  <main class="wrap layout">
-    <section>
-      <div class="toolbar">
-        <div class="tabs" role="tablist">
-          <button class="tab active" data-status="open">Open accounts</button>
-          <button class="tab" data-status="paid">Settled</button>
-          <button class="tab" data-status="all">All</button>
-        </div>
-        <div class="filters">
-          <select id="filter-category" aria-label="Category"><option value="">All categories</option></select>
-          <select id="filter-sort" aria-label="Sort">
-            <option value="newest">Newest</option>
-            <option value="urgent">Due soonest</option>
-            <option value="smallest">Smallest left</option>
-            <option value="closest">Closest to done</option>
-          </select>
+  <!-- ===== Feed (home) ===== -->
+  <div id="view-feed" class="view">
+    <section class="hero">
+      <div class="wrap">
+        <span class="eyebrow">Est. 2026 &nbsp;·&nbsp; By invitation only*</span>
+        <h1>Some fortunes are made. <em>Others are spent beautifully.</em></h1>
+        <p class="sub">A private ledger of real, verified bills from real people. Settle one with a single gesture — paid directly to the biller, recorded among the Patrons' Circle.</p>
+        <div class="hero-ctas" id="hero-ctas"></div>
+        <div class="stats">
+          <div><strong id="stat-paid">$0</strong><span>Settled by patrons</span></div>
+          <div><strong id="stat-count">0</strong><span>Accounts closed</span></div>
+          <div><strong id="stat-need">$0</strong><span>Awaiting a patron</span></div>
         </div>
       </div>
-      <div id="feed" class="feed" aria-live="polite"></div>
     </section>
 
-    <aside>
-      <div class="card">
-        <span class="eyebrow">Ranked by generosity</span>
-        <h2>The Patrons' Circle</h2>
-        <ol id="leaderboard" class="leaderboard"></ol>
-      </div>
-      <div class="card muted">
-        <span class="eyebrow">The protocol</span>
-        <h2>How it works</h2>
-        <ol class="steps">
-          <li>A bill is entered into the ledger.</li>
-          <li>A patron settles it — in part or in full.</li>
-          <li>Funds go directly to the biller. Discreetly.</li>
-        </ol>
-      </div>
-    </aside>
-  </main>
+    <main class="wrap layout">
+      <section>
+        <div class="toolbar">
+          <div class="tabs" role="tablist">
+            <button class="tab active" data-status="open">Open accounts</button>
+            <button class="tab" data-status="paid">Settled</button>
+            <button class="tab" data-status="all">All</button>
+          </div>
+          <div class="filters">
+            <select id="filter-category" aria-label="Category"><option value="">All categories</option></select>
+            <select id="filter-sort" aria-label="Sort">
+              <option value="newest">Newest</option>
+              <option value="urgent">Due soonest</option>
+              <option value="smallest">Smallest left</option>
+              <option value="closest">Closest to done</option>
+            </select>
+          </div>
+        </div>
+        <div id="feed" class="feed" aria-live="polite"></div>
+      </section>
+
+      <aside>
+        <div class="card">
+          <span class="eyebrow">Ranked by generosity</span>
+          <h2>The Patrons' Circle</h2>
+          <ol id="leaderboard" class="leaderboard"></ol>
+        </div>
+        <div class="card">
+          <span class="eyebrow">Standing</span>
+          <h2>Tiers of the Circle</h2>
+          <ul id="tier-ladder" class="tier-ladder"></ul>
+        </div>
+        <div class="card muted">
+          <span class="eyebrow">The protocol</span>
+          <h2>Every bill is vetted</h2>
+          <ol class="steps">
+            <li>A member submits a bill with their statement.</li>
+            <li>Our reviewers verify it with the biller before it goes live.</li>
+            <li>A patron settles it — in part or in full.</li>
+            <li>Funds go directly to the biller. Never to an individual.</li>
+            <li>Patrons never see a member's statement, contact details or last name, and can't message them.</li>
+          </ol>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- ===== Member / patron dashboard ===== -->
+  <main id="view-ledger" class="view wrap page" hidden></main>
+
+  <!-- ===== Reviewer queue ===== -->
+  <main id="view-review" class="view wrap page" hidden></main>
 
   <footer class="foot">
     <div class="wrap">
@@ -75,45 +97,106 @@
     </div>
   </footer>
 
-  <!-- Post a bill -->
-  <dialog id="post-dialog">
-    <form id="post-form" method="dialog">
-      <span class="eyebrow">Enter the ledger</span>
-      <h2>Submit a bill</h2>
-      <label>Title<input name="title" required minlength="4" maxlength="80" placeholder="ER visit after a bike crash"></label>
-      <label>Your story<textarea name="story" required minlength="10" maxlength="1000" rows="4" placeholder="What happened and why it matters"></textarea></label>
-      <div class="row">
-        <label>Amount owed ($)<input name="amount" type="number" min="1" step="0.01" required placeholder="850.00"></label>
-        <label>Category<select name="category" required></select></label>
+  <!-- Sign in / join -->
+  <dialog id="auth-dialog">
+    <form id="auth-form" novalidate>
+      <div class="auth-switch" role="tablist">
+        <button type="button" class="tab" data-mode="join">Request membership</button>
+        <button type="button" class="tab" data-mode="signin">Sign in</button>
       </div>
-      <label>Owed to (biller)<input name="biller" required minlength="2" maxlength="80" placeholder="Duke Energy"></label>
-      <div class="row">
-        <label>First name<input name="name" required maxlength="40"></label>
-        <label>City <small>(optional)</small><input name="city" maxlength="60"></label>
-      </div>
-      <label>Due date <small>(optional)</small><input name="dueDate" type="date"></label>
+      <fieldset class="role-pick" data-join>
+        <legend class="eyebrow">I am here to…</legend>
+        <label class="role-card">
+          <input type="radio" name="role" value="patron">
+          <span class="role-title">Settle bills</span>
+          <span class="role-desc">Become a patron. Rise from Bronze to Black Card.</span>
+        </label>
+        <label class="role-card">
+          <input type="radio" name="role" value="member">
+          <span class="role-title">Have a bill settled</span>
+          <span class="role-desc">Submit a verified bill for patrons to consider.</span>
+        </label>
+      </fieldset>
+      <label data-join><span id="name-label">Name</span><input name="displayName" maxlength="60" autocomplete="name"></label>
+      <label>Email<input name="email" type="email" maxlength="120" autocomplete="email" required></label>
+      <label>Password <small data-join>(at least 10 characters)</small><input name="password" type="password" minlength="10" maxlength="200" autocomplete="current-password" required></label>
       <p class="error" hidden></p>
       <div class="actions">
         <button type="button" class="btn btn-ghost" data-close>Cancel</button>
-        <button class="btn btn-primary" type="submit">Submit</button>
+        <button class="btn btn-primary" type="submit" id="auth-submit">Join</button>
       </div>
     </form>
   </dialog>
 
-  <!-- Pay a bill -->
+  <!-- Submit a bill (members) -->
+  <dialog id="post-dialog">
+    <form id="post-form" novalidate>
+      <span class="eyebrow">Enter the ledger</span>
+      <h2>Submit a bill</h2>
+      <p class="notice">Every bill is checked against your statement before it goes live, and patrons pay your <strong>biller directly</strong> — no money is ever sent to you. Patrons only see your first name and city. Keep phone numbers, emails, addresses and account numbers out of your story.</p>
+      <label>Title<input name="title" required minlength="4" maxlength="80" placeholder="ER visit after a bike crash"></label>
+      <label>Your story<textarea name="story" required minlength="10" maxlength="1000" rows="3" placeholder="What happened and why it matters"></textarea></label>
+      <div class="row">
+        <label>Amount owed ($)<input name="amount" type="number" min="1" step="0.01" required placeholder="850.00"></label>
+        <label>Category<select name="category" required></select></label>
+      </div>
+      <div class="row">
+        <label>Owed to (biller)<input name="biller" required minlength="2" maxlength="80" placeholder="Duke Energy"></label>
+        <label>Account no. — last 4<input name="accountLast4" required inputmode="numeric" pattern="\d{4}" maxlength="4" placeholder="4821"></label>
+      </div>
+      <div class="row">
+        <label>City or region <small>(optional)</small><input name="city" maxlength="60" placeholder="Tulsa, OK"></label>
+        <label>Due date <small>(optional)</small><input name="dueDate" type="date"></label>
+      </div>
+      <label>Statement or invoice <small>(PDF, PNG or JPG, up to 4 MB. Only reviewers see it, and it's deleted after review. Please black out your SSN, date of birth and all but the last 4 digits of your account number.)</small>
+        <input name="document" type="file" accept="application/pdf,image/png,image/jpeg" required>
+      </label>
+      <label class="check"><input type="checkbox" name="attest" required> I confirm this bill is real, is mine, and the details match my statement. False submissions lead to a permanent ban.</label>
+      <p class="error" hidden></p>
+      <div class="actions">
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button class="btn btn-primary" type="submit">Submit for review</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Settle a bill (patrons) -->
   <dialog id="pay-dialog">
-    <form id="pay-form" method="dialog">
+    <form id="pay-form" novalidate>
       <span class="eyebrow">Settle this account</span>
       <h2 id="pay-title"></h2>
       <p class="sub-dark" id="pay-remaining"></p>
       <label>Amount ($)<input name="amount" type="number" min="1" step="0.01" required></label>
       <label class="check"><input type="checkbox" name="payInFull"> Settle in full</label>
-      <label>Your name <small>(leave blank to stay anonymous)</small><input name="patron" maxlength="60" placeholder="The Duke of Somewhere"></label>
+      <label class="check"><input type="checkbox" name="anonymous"> Give anonymously <small>(still counts toward your tier)</small></label>
       <label>Message <small>(optional)</small><input name="message" maxlength="280" placeholder="With compliments."></label>
       <p class="error" hidden></p>
       <div class="actions">
         <button type="button" class="btn btn-ghost" data-close>Cancel</button>
         <button class="btn btn-primary" type="submit">Settle</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Report a bill -->
+  <dialog id="report-dialog">
+    <form id="report-form" novalidate>
+      <span class="eyebrow">Discretion is appreciated</span>
+      <h2>Report this bill</h2>
+      <p class="sub-dark" id="report-title"></p>
+      <label>Reason
+        <select name="reason" required>
+          <option value="fake">Looks fake or misleading</option>
+          <option value="duplicate">Posted more than once</option>
+          <option value="inappropriate">Inappropriate content</option>
+          <option value="other">Something else</option>
+        </select>
+      </label>
+      <label>Details <small>(optional)</small><textarea name="details" maxlength="500" rows="3"></textarea></label>
+      <p class="error" hidden></p>
+      <div class="actions">
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button class="btn btn-primary" type="submit">Send report</button>
       </div>
     </form>
   </dialog>
