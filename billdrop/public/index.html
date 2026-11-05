@@ -4,23 +4,27 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>BillDrop</title>
-  <meta name="description" content="Post your bills. Bored billionaires pay them off.">
+  <meta name="description" content="A private ledger of real bills, settled by patrons of considerable means.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;1,500&family=Inter:wght@400;500;600&display=swap">
   <link rel="stylesheet" href="styles.css">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💸</text></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%230b0a08'/><text x='50' y='72' font-size='70' text-anchor='middle' fill='%23c9a961' font-family='Georgia,serif'>B</text></svg>">
 </head>
 <body>
   <header class="hero">
     <div class="wrap">
       <nav>
-        <span class="logo">💸 BillDrop</span>
-        <button class="btn btn-ghost" data-open="post-dialog">Post a bill</button>
+        <span class="logo"><span class="logo-mark">BillDrop</span><span class="eyebrow">The Private Ledger</span></span>
+        <button class="btn btn-ghost" data-open="post-dialog">Submit a bill</button>
       </nav>
-      <h1>Got bills? Somebody's got <em>way</em> too much money.</h1>
-      <p class="sub">Post what you owe. Bored billionaires browse the feed and pay it off — straight to the biller.</p>
+      <span class="eyebrow">Est. 2026 &nbsp;·&nbsp; By invitation only*</span>
+      <h1>Some fortunes are made. <em>Others are spent beautifully.</em></h1>
+      <p class="sub">A private ledger of real bills from real people. Settle one with a single gesture — paid directly to the biller, recorded among the Patrons' Circle.</p>
       <div class="stats" id="stats">
-        <div><strong id="stat-paid">$0</strong><span>paid off so far</span></div>
-        <div><strong id="stat-count">0</strong><span>bills wiped out</span></div>
-        <div><strong id="stat-need">$0</strong><span>still waiting</span></div>
+        <div><strong id="stat-paid">$0</strong><span>Settled by patrons</span></div>
+        <div><strong id="stat-count">0</strong><span>Accounts closed</span></div>
+        <div><strong id="stat-need">$0</strong><span>Awaiting a patron</span></div>
       </div>
     </div>
   </header>
@@ -29,8 +33,8 @@
     <section>
       <div class="toolbar">
         <div class="tabs" role="tablist">
-          <button class="tab active" data-status="open">Open</button>
-          <button class="tab" data-status="paid">Paid off</button>
+          <button class="tab active" data-status="open">Open accounts</button>
+          <button class="tab" data-status="paid">Settled</button>
           <button class="tab" data-status="all">All</button>
         </div>
         <div class="filters">
@@ -48,24 +52,34 @@
 
     <aside>
       <div class="card">
-        <h2>🏆 Top patrons</h2>
+        <span class="eyebrow">Ranked by generosity</span>
+        <h2>The Patrons' Circle</h2>
         <ol id="leaderboard" class="leaderboard"></ol>
       </div>
       <div class="card muted">
+        <span class="eyebrow">The protocol</span>
         <h2>How it works</h2>
         <ol class="steps">
-          <li>Post your bill and who it's owed to.</li>
-          <li>A patron chips in or pays it in full.</li>
-          <li>Money goes to the biller, not a stranger's wallet.</li>
+          <li>A bill is entered into the ledger.</li>
+          <li>A patron settles it — in part or in full.</li>
+          <li>Funds go directly to the biller. Discreetly.</li>
         </ol>
       </div>
     </aside>
   </main>
 
+  <footer class="foot">
+    <div class="wrap">
+      <p class="fine">*Everyone is invited.</p>
+      <p>BillDrop &nbsp;·&nbsp; The Private Ledger &nbsp;·&nbsp; Est. 2026</p>
+    </div>
+  </footer>
+
   <!-- Post a bill -->
   <dialog id="post-dialog">
     <form id="post-form" method="dialog">
-      <h2>Post a bill</h2>
+      <span class="eyebrow">Enter the ledger</span>
+      <h2>Submit a bill</h2>
       <label>Title<input name="title" required minlength="4" maxlength="80" placeholder="ER visit after a bike crash"></label>
       <label>Your story<textarea name="story" required minlength="10" maxlength="1000" rows="4" placeholder="What happened and why it matters"></textarea></label>
       <div class="row">
@@ -81,7 +95,7 @@
       <p class="error" hidden></p>
       <div class="actions">
         <button type="button" class="btn btn-ghost" data-close>Cancel</button>
-        <button class="btn btn-primary" type="submit">Post it</button>
+        <button class="btn btn-primary" type="submit">Submit</button>
       </div>
     </form>
   </dialog>
@@ -89,16 +103,17 @@
   <!-- Pay a bill -->
   <dialog id="pay-dialog">
     <form id="pay-form" method="dialog">
-      <h2>Pay off <span id="pay-title"></span></h2>
+      <span class="eyebrow">Settle this account</span>
+      <h2 id="pay-title"></h2>
       <p class="sub-dark" id="pay-remaining"></p>
       <label>Amount ($)<input name="amount" type="number" min="1" step="0.01" required></label>
-      <label class="check"><input type="checkbox" name="payInFull"> Just pay the whole thing 💰</label>
-      <label>Your name <small>(leave blank to stay anonymous)</small><input name="patron" maxlength="60" placeholder="Anonymous Yacht Owner"></label>
-      <label>Message <small>(optional)</small><input name="message" maxlength="280" placeholder="Go get 'em."></label>
+      <label class="check"><input type="checkbox" name="payInFull"> Settle in full</label>
+      <label>Your name <small>(leave blank to stay anonymous)</small><input name="patron" maxlength="60" placeholder="The Duke of Somewhere"></label>
+      <label>Message <small>(optional)</small><input name="message" maxlength="280" placeholder="With compliments."></label>
       <p class="error" hidden></p>
       <div class="actions">
         <button type="button" class="btn btn-ghost" data-close>Cancel</button>
-        <button class="btn btn-primary" type="submit">Pay</button>
+        <button class="btn btn-primary" type="submit">Settle</button>
       </div>
     </form>
   </dialog>

@@ -1,7 +1,7 @@
 {
   "name": "billdrop",
   "version": "0.1.0",
-  "description": "Post your bills. Bored billionaires pay them off.",
+  "description": "A private ledger of real bills, settled by patrons of considerable means.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

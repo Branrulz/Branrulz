@@ -6,7 +6,6 @@ const state = { status: "open", category: "", sort: "newest", bills: [] };
 const money = (c) => "$" + (c / 100).toLocaleString(undefined, { minimumFractionDigits: c % 100 ? 2 : 0, maximumFractionDigits: 2 });
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 const label = (cat) => cat.replace("-", " ").replace(/\b\w/g, (m) => m.toUpperCase());
-const ICON = { medical: "🏥", rent: "🏠", "student-loan": "🎓", "credit-card": "💳", utilities: "💡", car: "🚗", other: "📄" };
 
 function ago(iso) {
   const s = (Date.now() - Date.parse(iso)) / 1000;
@@ -51,8 +50,8 @@ function billCard(b) {
   return `
     <article class="bill ${b.paidOff ? "paid" : ""}">
       <div class="bill-head">
-        <span class="cat">${ICON[b.category] || "📄"} ${esc(label(b.category))}</span>
-        ${b.paidOff ? `<span class="stamp">PAID OFF</span>` : due(b.dueDate)}
+        <span class="cat">${esc(label(b.category))}</span>
+        ${b.paidOff ? `<span class="stamp">Settled</span>` : due(b.dueDate)}
       </div>
       <h3>${esc(b.title)}</h3>
       <p class="who">${esc(b.name)}${b.city ? " · " + esc(b.city) : ""} · ${ago(b.createdAt)}</p>
@@ -61,10 +60,10 @@ function billCard(b) {
       <div class="progress" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><span style="width:${pct}%"></span></div>
       <div class="amounts">
         <span><strong>${money(b.paidCents)}</strong> of ${money(b.amountCents)}</span>
-        <span>${b.paidOff ? "🎉 Done" : money(b.remainingCents) + " left"}</span>
+        <span>${b.paidOff ? "Settled in full" : money(b.remainingCents) + " outstanding"}</span>
       </div>
-      ${latest.length ? `<ul class="contribs">${latest.map((c) => `<li><strong>${esc(c.patron)}</strong> paid ${money(c.amountCents)}${c.message ? ` — “${esc(c.message)}”` : ""}</li>`).join("")}</ul>` : ""}
-      ${b.paidOff ? "" : `<button class="btn btn-primary btn-block" data-pay="${esc(b.id)}">Pay this off</button>`}
+      ${latest.length ? `<ul class="contribs">${latest.map((c) => `<li><strong>${esc(c.patron)}</strong> gave ${money(c.amountCents)}${c.message ? ` — <q>${esc(c.message)}</q>` : ""}</li>`).join("")}</ul>` : ""}
+      ${b.paidOff ? "" : `<button class="btn btn-primary btn-block" data-pay="${esc(b.id)}">Settle this account</button>`}
     </article>`;
 }
 
@@ -75,7 +74,7 @@ async function loadFeed() {
     state.bills = await api("/bills?" + q);
     $("#feed").innerHTML = state.bills.length
       ? state.bills.map(billCard).join("")
-      : `<p class="empty">Nothing here yet. ${state.status === "paid" ? "Billionaires, get to work." : "Post the first bill!"}</p>`;
+      : `<p class="empty">${state.status === "paid" ? "No accounts settled yet. The ledger awaits its first patron." : "The ledger is quiet. Submit the first bill."}</p>`;
   } catch (e) {
     $("#feed").innerHTML = `<p class="empty">Couldn't load bills: ${esc(e.message)}</p>`;
   }
@@ -88,7 +87,7 @@ async function loadStats() {
   $("#stat-need").textContent = money(s.openNeedCents);
   $("#leaderboard").innerHTML = s.leaderboard.length
     ? s.leaderboard.map((p) => `<li><span>${esc(p.patron)}</span><strong>${money(p.amountCents)}</strong></li>`).join("")
-    : `<li class="empty-small">No patrons yet. Be the first.</li>`;
+    : `<li class="empty-small">A seat at the head of the table remains open.</li>`;
 }
 
 const refresh = () => Promise.all([loadFeed(), loadStats()]);
@@ -113,7 +112,7 @@ $("#post-form").addEventListener("submit", async (e) => {
     form.reset();
     showError(form, "");
     form.closest("dialog").close();
-    toast("Bill posted. Fingers crossed a billionaire is bored today.");
+    toast("Your bill has been entered into the ledger.");
     state.status = "open";
     state.sort = "newest";
     $("#filter-sort").value = "newest";
@@ -133,8 +132,8 @@ $("#feed").addEventListener("click", (e) => {
   payingId = bill.id;
   payForm.reset();
   showError(payForm, "");
-  $("#pay-title").textContent = `“${bill.title}”`;
-  $("#pay-remaining").textContent = `${money(bill.remainingCents)} left, owed to ${bill.biller}.`;
+  $("#pay-title").textContent = bill.title;
+  $("#pay-remaining").textContent = `${money(bill.remainingCents)} outstanding to ${bill.biller}.`;
   payForm.amount.max = (bill.remainingCents / 100).toFixed(2);
   payForm.amount.value = (bill.remainingCents / 100).toFixed(2);
   payForm.amount.disabled = false;
@@ -158,7 +157,7 @@ payForm.addEventListener("submit", async (e) => {
   try {
     const bill = await api(`/bills/${payingId}/pay`, { method: "POST", body });
     payForm.closest("dialog").close();
-    toast(bill.paidOff ? `🎉 “${bill.title}” is PAID OFF!` : `Thanks! ${money(bill.remainingCents)} to go.`);
+    toast(bill.paidOff ? `Account settled. Most generous.` : `Received with gratitude. ${money(bill.remainingCents)} remains.`);
     refresh();
   } catch (err) { showError(payForm, err.message); }
 });
@@ -177,7 +176,7 @@ $("#filter-sort").addEventListener("change", (e) => { state.sort = e.target.valu
 
 (async () => {
   const cats = await api("/categories");
-  const opts = cats.map((c) => `<option value="${c}">${ICON[c] || ""} ${label(c)}</option>`).join("");
+  const opts = cats.map((c) => `<option value="${c}">${label(c)}</option>`).join("");
   $("#filter-category").insertAdjacentHTML("beforeend", opts);
   $("#post-form").category.innerHTML = opts;
   refresh();
