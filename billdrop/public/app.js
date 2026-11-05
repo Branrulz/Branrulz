@@ -172,7 +172,8 @@ function memberCard(me) {
 }
 
 async function renderPatronLedger(el) {
-  const [me, giving] = await Promise.all([api("/me"), api("/my/giving")]);
+  const year = state.taxYear || new Date().getFullYear();
+  const [me, giving, tax] = await Promise.all([api("/me"), api("/my/giving"), api("/my/tax?year=" + year)]);
   state.me = me;
   renderNav();
   el.innerHTML = `
@@ -185,11 +186,14 @@ async function renderPatronLedger(el) {
         <h2>Accounts you've settled</h2>
         ${giving.length ? `<ul class="history">${giving.map((g) => `
           <li><div><strong>${esc(g.billTitle)}</strong>
-            <span class="muted-line">${ago(g.createdAt)} · paid to ${esc(g.payee)}${g.anonymous ? " · anonymous" : ""}${g.billPaidOff ? " · settled" : ""}</span></div>
+            <span class="muted-line">${ago(g.createdAt)} · paid to ${esc(g.payee)}${g.anonymous ? " · anonymous" : ""}${g.billPaidOff ? " · settled" : ""} · <a href="#/receipt/${esc(g.id)}">Receipt</a></span></div>
             <span class="history-amt">${money(g.amountCents)}</span></li>`).join("")}</ul>`
-        : `<p class="empty-small">Nothing yet. <a href="#/">Browse open accounts</a> to make your first gesture.</p>`}
+        : `<p class="empty-small">Nothing yet. <a href="#/deck">Open the Deck</a> to make your first gesture.</p>`}
       </section>
-    </div>`;
+    </div>
+    ${taxCard(tax)}`;
+  const sel = $("#tax-year", el);
+  if (sel) sel.addEventListener("change", () => { state.taxYear = Number(sel.value); renderPatronLedger(el); });
 }
 
 const STATUS = {
@@ -264,14 +268,17 @@ async function renderReview(el) {
 async function route() {
   const r = location.hash.replace(/^#/, "") || "/";
   const views = { "/": "view-feed", "/deck": "view-deck", "/ledger": "view-ledger", "/review": "view-review" };
-  let view = views[r] || "view-feed";
-  if ((view === "view-ledger" || view === "view-review") && !state.me) view = "view-feed";
+  const doc = r.match(/^\/(receipt|statement)\/([\w-]+)$/);
+  let view = doc ? "view-doc" : views[r] || "view-feed";
+  if ((view === "view-ledger" || view === "view-review" || view === "view-doc") && !state.me) view = "view-feed";
+  if (view === "view-doc" && !isRole("patron")) view = "view-feed";
   if (view === "view-deck" && state.me && !isRole("patron")) view = "view-feed";
   $$(".view").forEach((v) => (v.hidden = v.id !== view));
   window.scrollTo(0, 0);
   try {
     if (view === "view-feed") await refreshFeed();
     if (view === "view-deck") await loadDeck();
+    if (view === "view-doc") await (doc[1] === "receipt" ? renderReceipt(doc[2]) : renderStatement(Number(doc[2])));
     if (view === "view-ledger") {
       if (isRole("admin")) return void (location.hash = "#/review");
       await (isRole("patron") ? renderPatronLedger : renderMemberLedger)($("#view-ledger"));
@@ -347,6 +354,7 @@ document.addEventListener("click", async (e) => {
     return toast("You've signed out.");
   }
   if (t.dataset.action === "submit-bill") return openPost();
+  if (t.dataset.action === "print") return window.print();
   if (t.dataset.swipe) return swipe(t.dataset.swipe);
   if (t.dataset.action === "reset-deck") {
     await api("/deck/reset", { method: "POST", body: {} });
@@ -421,6 +429,9 @@ function openPay(id) {
   payForm.amount.max = (bill.remainingCents / 100).toFixed(2);
   payForm.amount.value = (bill.remainingCents / 100).toFixed(2);
   payForm.amount.disabled = false;
+  $("#pay-tax").hidden = true;
+  state.taxPreview = null;
+  api(`/bills/${bill.id}/tax-preview`).then((t) => { state.taxPreview = t; updateTaxNote(); }).catch(() => {});
   $("#pay-dialog").showModal();
 }
 
@@ -442,7 +453,7 @@ payForm.addEventListener("submit", async (e) => {
     state.me = { ...state.me, givenCents: res.givenCents, tier: res.tier };
     renderNav();
     if (res.tier.id !== before) toast(`You've risen to ${res.tier.name}. The Circle takes note.`);
-    else toast(res.bill.paidOff ? "Account settled. Most generous." : `Received with gratitude. ${money(res.bill.remainingCents)} remains.`);
+    else toast(`${res.bill.paidOff ? "Account settled. Most generous." : "Received with gratitude."} Receipt ${res.receipt.receiptNo} filed to your tax documents.`);
     if (deckPending === payingId) { deckPending = null; state.deck.shift(); renderDeck(); }
     else refreshFeed();
   } catch (err) { showError(payForm, err.message); }
@@ -567,6 +578,99 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "ArrowRight") swipe("right");
   if (e.key === "ArrowLeft") swipe("left");
 });
+
+// ---------- paperwork: tax note, tax documents, receipts, statements ----------
+
+const TREATMENT = {
+  medical: "Medical bill paid directly to the provider — generally excluded from gift tax with no dollar limit (IRC §2503(e)), and not reported on Form 709.",
+  gift: "Gift to an individual, paid to their creditor — counts toward the annual gift-tax exclusion for this recipient.",
+};
+const NOT_DEDUCTIBLE = "Not a tax-deductible charitable contribution: gifts that benefit a specific person can't be deducted.";
+
+function updateTaxNote() {
+  const t = state.taxPreview, el = $("#pay-tax");
+  if (!t || payingId == null) return;
+  const amt = Math.round(Number(payForm.amount.value || 0) * 100) || 0;
+  let html = `<strong>Paperwork:</strong> ${TREATMENT[t.treatment]}`;
+  if (t.treatment === "gift") {
+    const after = t.givenToRecipientThisYearCents + amt;
+    html += ` You've given this person ${money(t.givenToRecipientThisYearCents)} in ${t.year}; the exclusion is ${money(t.annualExclusionCents)}.`;
+    if (after > t.annualExclusionCents) html += ` <span class="tax-warn">This gift takes you ${money(after - t.annualExclusionCents)} over — you'd file Form 709 (usually no tax owed).</span>`;
+  }
+  html += ` <span class="tax-fine">${NOT_DEDUCTIBLE} A receipt is filed automatically.</span>`;
+  el.innerHTML = html;
+  el.hidden = false;
+}
+payForm.amount.addEventListener("input", updateTaxNote);
+payForm.payInFull.addEventListener("change", updateTaxNote);
+
+function taxCard(t) {
+  const years = t.years.length ? t.years : [t.year];
+  if (!years.includes(t.year)) years.unshift(t.year);
+  return `
+    <section class="card tax-card">
+      <div class="tax-head">
+        <div><span class="eyebrow">Paperwork, handled</span><h2>Tax documents</h2></div>
+        <select id="tax-year" aria-label="Tax year">${years.map((y) => `<option ${y === t.year ? "selected" : ""}>${y}</option>`).join("")}</select>
+      </div>
+      <div class="tax-figures">
+        <div><span class="mc-label">Total given</span><strong>${money(t.totalCents)}</strong></div>
+        <div><span class="mc-label">Medical, paid to providers</span><strong>${money(t.medicalCents)}</strong><span class="muted-line">Excluded from gift tax</span></div>
+        <div><span class="mc-label">Gifts to individuals</span><strong>${money(t.giftCents)}</strong><span class="muted-line">${money(t.annualExclusionCents)} exclusion per person</span></div>
+      </div>
+      ${t.form709Likely ? `<p class="tax-warn-box">You gave more than ${money(t.annualExclusionCents)} in non-medical gifts to at least one person in ${t.year}. A gift tax return (Form 709) is likely due by April 15 — tax is rarely owed, as it draws on your lifetime exemption.</p>` : ""}
+      ${t.recipients.length ? `<table class="tax-table">
+        <thead><tr><th>On behalf of</th><th>Medical</th><th>Other gifts</th><th></th></tr></thead>
+        <tbody>${t.recipients.map((r) => `<tr><td>${esc(r.recipient)}</td><td>${money(r.medicalCents)}</td><td>${money(r.giftCents)}</td>
+          <td>${r.overExclusion ? `<span class="status status-flagged">Over by ${money(r.overByCents)}</span>` : `<span class="status status-verified">Within exclusion</span>`}</td></tr>`).join("")}</tbody>
+      </table>` : `<p class="empty-small">No gifts in ${t.year}.</p>`}
+      <div class="actions tax-actions">
+        <a class="btn btn-ghost" href="/api/my/tax.csv?year=${t.year}" download>Download CSV for your accountant</a>
+        <a class="btn btn-primary" href="#/statement/${t.year}">Annual statement</a>
+      </div>
+      <p class="tax-fine">${NOT_DEDUCTIBLE} BillDrop provides records, not tax advice — share these with your tax professional.</p>
+    </section>`;
+}
+
+const docShell = (inner) => `
+  <div class="doc-toolbar"><a class="btn btn-link" href="#/ledger">← Back</a><button class="btn btn-primary" data-action="print">Print or save as PDF</button></div>
+  <article class="paper">${inner}
+    <footer class="paper-foot">BillDrop · The Private Ledger · Records only, not tax advice. ${NOT_DEDUCTIBLE}</footer>
+  </article>`;
+
+async function renderReceipt(id) {
+  const r = await api("/my/receipts/" + encodeURIComponent(id));
+  $("#view-doc").innerHTML = docShell(`
+    <div class="paper-head"><div><span class="paper-brand">BillDrop</span><span class="paper-kind">Payment receipt</span></div>
+      <div class="paper-meta">No. ${esc(r.receiptNo)}<br>${new Date(r.date).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}</div></div>
+    <dl class="paper-facts">
+      <dt>Paid by</dt><dd>${esc(r.payer.name)} &lt;${esc(r.payer.email)}&gt;</dd>
+      <dt>Paid directly to</dt><dd>${esc(r.payee)}</dd>
+      <dt>On behalf of</dt><dd>${esc(r.onBehalfOf)}</dd>
+      <dt>For</dt><dd>${esc(r.billTitle)} (${esc(label(r.category))})</dd>
+      <dt>Amount</dt><dd class="paper-amt">${money(r.amountCents)}</dd>
+    </dl>
+    <p class="paper-note"><strong>Gift-tax treatment:</strong> ${TREATMENT[r.treatment]}${r.treatment === "medical" ? " If insurance later reimburses this expense, the reimbursed portion does not qualify." : ""}</p>`);
+}
+
+async function renderStatement(year) {
+  const t = await api("/my/tax?year=" + year);
+  $("#view-doc").innerHTML = docShell(`
+    <div class="paper-head"><div><span class="paper-brand">BillDrop</span><span class="paper-kind">Annual giving statement · ${t.year}</span></div>
+      <div class="paper-meta">${esc(state.me.displayName)}<br>${esc(state.me.email)}</div></div>
+    <div class="paper-summary">
+      <div><span>Total paid</span><strong>${money(t.totalCents)}</strong></div>
+      <div><span>Medical, direct to provider (IRC §2503(e))</span><strong>${money(t.medicalCents)}</strong></div>
+      <div><span>Gifts to individuals (annual exclusion ${money(t.annualExclusionCents)}/person)</span><strong>${money(t.giftCents)}</strong></div>
+    </div>
+    ${t.form709Likely ? `<p class="paper-note"><strong>Form 709 likely required:</strong> non-medical gifts to at least one recipient exceeded ${money(t.annualExclusionCents)} in ${t.year}.</p>` : ""}
+    <h3>By recipient</h3>
+    <table class="paper-table"><thead><tr><th>On behalf of</th><th>Medical</th><th>Other gifts</th><th>Over exclusion</th></tr></thead>
+      <tbody>${t.recipients.map((r) => `<tr><td>${esc(r.recipient)}</td><td>${money(r.medicalCents)}</td><td>${money(r.giftCents)}</td><td>${r.overExclusion ? money(r.overByCents) : "—"}</td></tr>`).join("") || `<tr><td colspan="4">No gifts this year.</td></tr>`}</tbody></table>
+    <h3>All payments</h3>
+    <table class="paper-table"><thead><tr><th>Receipt</th><th>Date</th><th>Paid to</th><th>On behalf of</th><th>Treatment</th><th>Amount</th></tr></thead>
+      <tbody>${t.receipts.map((r) => `<tr><td>${esc(r.receiptNo)}</td><td>${r.date.slice(0, 10)}</td><td>${esc(r.payee)}</td><td>${esc(r.onBehalfOf)}</td><td>${r.treatment === "medical" ? "Medical §2503(e)" : "Gift"}</td><td>${money(r.amountCents)}</td></tr>`).join("") || `<tr><td colspan="6">—</td></tr>`}</tbody></table>`);
+}
 
 // ---------- report ----------
 

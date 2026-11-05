@@ -1,45 +1,73 @@
-# 💸 BillDrop
+# BillDrop
 
-**Post your bills. Bored billionaires pay them off.**
+**A private ledger of real bills, settled by patrons of considerable means.**
 
-People post a bill or debt (medical, rent, student loan, utilities, etc.) along with who it's owed to.
-Wealthy patrons browse the feed, chip in or pay a bill in full, and get a spot on the leaderboard.
+People who need help (**members**) submit a bill along with their statement. A reviewer checks it before it goes live. Wealthy **patrons** swipe through verified bills and settle them, and the money goes **directly to the biller**, never to an individual. Patrons climb tiers from Bronze to Black Card and get their tax paperwork prepared automatically.
 
 ## Run it
 
 ```bash
 cd billdrop
-npm start          # http://localhost:3000
+ADMIN_EMAILS=you@example.com npm start    # http://localhost:3000
 npm test
 ```
 
-No dependencies — just Node 18+. Data lives in `billdrop/data/db.json` (created and seeded with sample bills on first run; delete it to reset).
+No dependencies, just Node 18+. Data lives in `billdrop/data/` (created and seeded with sample bills on first run; delete the folder to reset). Signing up with an email listed in `ADMIN_EMAILS` gives you a **reviewer** account.
+
+| Env var | Purpose |
+| --- | --- |
+| `ADMIN_EMAILS` | Comma-separated emails that become reviewers on sign-up |
+| `PORT` | Default 3000 |
+| `DATA_DIR` | Where `db.json` and uploaded statements live |
+| `COOKIE_SECURE=1` | Set when serving over HTTPS |
+| `AUTH_ATTEMPTS_PER_10_MIN` | Sign-up/login rate limit per IP (default 20) |
+
+## Who does what
+
+| | Member | Patron | Reviewer |
+| --- | --- | --- | --- |
+| Submit a bill (with statement) | ✅ | | |
+| Settle a bill | | ✅ | |
+| Swipe the Deck | | ✅ | |
+| Tiers, membership card, tax documents | | ✅ | |
+| Approve / reject / ban | | | ✅ |
+| Report a suspicious bill | ✅ | ✅ | |
 
 ## Features
 
-- Post a bill: title, story, amount, category, biller, first name, city, optional due date
-- Feed with tabs (Open / Paid off / All), category filter, and sorting (newest, due soonest, smallest left, closest to done)
-- Pay part of a bill or "just pay the whole thing", with an optional name and message
-- Progress bars, "PAID OFF" stamp, site-wide totals, and a top-patrons leaderboard
-- Works on phones, supports dark mode
+- **The Deck**: a swipeable card stack. Swipe right (or press →, or tap ✓) to settle: a confirm sheet opens set to "settle in full", so one more tap pays. Swipe left (←, ✕) to pass; passes are saved and can be reset.
+- **Tiers**, based on lifetime giving:
 
-## API
+  | Tier | Lifetime giving |
+  | --- | --- |
+  | Patron | starting tier |
+  | Bronze | $100+ |
+  | Silver | $1,000+ |
+  | Gold | $5,000+ |
+  | Platinum | $25,000+ |
+  | Black Card | $100,000+ |
 
-| Method | Path | Body |
+  Shown as a membership card, chips on the leaderboard, and progress to the next tier.
+- **Paperwork, handled**: a receipt for every payment, an annual statement, a CSV for the accountant, and a live gift-tax note before paying.
+- **Verification**: required statement, human review, duplicate detection, reports and bans.
+- **Identity protection**: first name only, no contact or ID details allowed in public text, statements deleted after review, no patron-to-member messaging.
+- Black-and-gold "private members' club" look, works on phones.
+
+See **[TRUST.md](TRUST.md)** for the full fraud, identity-theft and tax write-up, including what's still needed before launch.
+
+## ⚠️ Prototype: payments are simulated
+
+"Settle" records the payment, but no money moves. Before launch: real payments (e.g. Stripe), payouts to billers through bill-pay rails, ID verification for members and patrons, a real database, and a legal/CPA review. The details are in TRUST.md.
+
+## API (summary)
+
+| Method | Path | Who |
 | --- | --- | --- |
-| GET | `/api/bills?status=open\|paid\|all&category=&sort=` | |
-| POST | `/api/bills` | `title, story, amount, category, biller, name, city?, dueDate?` |
-| GET | `/api/bills/:id` | |
-| POST | `/api/bills/:id/pay` | `amount` or `payInFull: true`, `patron?`, `message?` |
-| GET | `/api/stats` | |
-| GET | `/api/categories` | |
-
-## ⚠️ This is a prototype — payments are simulated
-
-Clicking "Pay" records a pledge; no money moves. Before this goes live it needs:
-
-1. **Real payments** — e.g. Stripe Checkout for patrons. Ideally pay the **biller directly** (or via a bill-pay service) rather than sending cash to the poster, which cuts down on scams.
-2. **Bill verification** — require an uploaded statement / account number and have someone (or a service) confirm it before a bill goes public.
-3. **Accounts & moderation** — logins for posters and patrons, reporting, rate limiting, and admin review.
-4. **A real database** — swap the JSON file for SQLite/Postgres.
-5. **Legal check** — money transmission rules, gift-tax and charity implications, and privacy for people sharing debt details.
+| POST | `/api/auth/signup` · `/api/auth/login` · `/api/auth/logout` | anyone |
+| GET | `/api/me` | anyone |
+| GET | `/api/bills?status=open\|paid\|all&category=&sort=` · `/api/deck` · `/api/stats` | anyone |
+| POST | `/api/bills` (with statement) · GET `/api/my/bills` | member |
+| POST | `/api/bills/:id/pay` · `/api/bills/:id/pass` · `/api/deck/reset` | patron |
+| GET | `/api/bills/:id/tax-preview` · `/api/my/giving` · `/api/my/tax?year=` · `/api/my/tax.csv?year=` · `/api/my/receipts/:id` | patron |
+| POST | `/api/bills/:id/report` | signed in |
+| GET | `/api/admin/queue` · `/api/admin/bills/:id/document` · POST `/api/admin/bills/:id/review` | reviewer |

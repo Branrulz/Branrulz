@@ -102,6 +102,9 @@
   <!-- ===== Member / patron dashboard ===== -->
   <main id="view-ledger" class="view wrap page" hidden></main>
 
+  <!-- ===== Printable receipt / annual statement ===== -->
+  <main id="view-doc" class="view wrap page" hidden></main>
+
   <!-- ===== Reviewer queue ===== -->
   <main id="view-review" class="view wrap page" hidden></main>
 
@@ -184,6 +187,7 @@
       <label>Amount ($)<input name="amount" type="number" min="1" step="0.01" required></label>
       <label class="check"><input type="checkbox" name="payInFull"> Settle in full</label>
       <label class="check"><input type="checkbox" name="anonymous"> Give anonymously <small>(still counts toward your tier)</small></label>
+      <p class="tax-note" id="pay-tax" hidden></p>
       <label>Message <small>(optional)</small><input name="message" maxlength="280" placeholder="With compliments."></label>
       <p class="error" hidden></p>
       <div class="actions">

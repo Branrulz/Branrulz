@@ -20,6 +20,7 @@ const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 const PUBLIC_DIR = path.join(__dirname, "public");
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
 const COOKIE_SECURE = process.env.COOKIE_SECURE === "1";
+const AUTH_ATTEMPTS = Number(process.env.AUTH_ATTEMPTS_PER_10_MIN) || 20; // sign-ups + logins per IP
 
 const MAX_BODY = 16 * 1024;
 const MAX_UPLOAD_BODY = 6 * 1024 * 1024; // base64 of a 4 MB file fits under this
@@ -44,6 +45,13 @@ const TIERS = [
   { id: "platinum", name: "Platinum", minCents: 25_000_00 },
   { id: "black", name: "Black Card", minCents: 100_000_00 },
 ];
+
+// Gift-tax figures used on patron paperwork. Not tax advice; update each year from the IRS.
+// Annual exclusion per recipient (IRC §2503(b)). Medical bills paid straight to the provider fall
+// under the separate, unlimited §2503(e) exclusion.
+const ANNUAL_EXCLUSION_CENTS = { 2025: 19_000_00, 2026: 19_000_00 };
+const exclusionFor = (year) => ANNUAL_EXCLUSION_CENTS[year] ??
+  ANNUAL_EXCLUSION_CENTS[Math.max(...Object.keys(ANNUAL_EXCLUSION_CENTS).map(Number))];
 
 // ---------- errors & small utils ----------
 
@@ -384,7 +392,7 @@ function parseDocument(doc) {
 // ---------- API: auth ----------
 
 async function signup(req, res) {
-  rateLimit("auth:" + clientIp(req), 20, 10 * 60000);
+  rateLimit("auth:" + clientIp(req), AUTH_ATTEMPTS, 10 * 60000);
   const body = await readJson(req);
   const email = str(body.email, "Email", { max: 120 }).toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, "Please enter a valid email");
@@ -408,7 +416,7 @@ async function signup(req, res) {
 }
 
 async function login(req, res) {
-  rateLimit("auth:" + clientIp(req), 20, 10 * 60000);
+  rateLimit("auth:" + clientIp(req), AUTH_ATTEMPTS, 10 * 60000);
   const body = await readJson(req);
   const email = String(body.email || "").trim().toLowerCase();
   const user = db.users.find((u) => u.email === email);
@@ -546,7 +554,8 @@ async function payBill(req, res, id) {
   });
   save();
   const total = givenBy(user.id);
-  send(res, 200, { bill: publicBill(bill), givenCents: total, tier: tierFor(total) });
+  const receipt = receiptView(user, bill, bill.contributions[bill.contributions.length - 1]);
+  send(res, 200, { bill: publicBill(bill), givenCents: total, tier: tierFor(total), receipt });
 }
 
 async function reportBill(req, res, id) {
@@ -612,6 +621,101 @@ function myGiving(req) {
     if (c.patronId === user.id) out.push({ ...contributionView(c), anonymous: c.anonymous, billId: b.id, billTitle: b.title, billPaidOff: isPaidOff(b) });
   }
   return out.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+// ---------- API: patron paperwork (receipts, annual statement, CSV) ----------
+
+const receiptNo = (c) => `BD-${c.createdAt.slice(0, 4)}-${c.id.slice(0, 8).toUpperCase()}`;
+const treatmentOf = (bill) => (bill.category === "medical" ? "medical" : "gift");
+
+function patronGifts(user, year) {
+  const out = [];
+  for (const b of db.bills) for (const c of b.contributions) {
+    if (c.patronId !== user.id) continue;
+    if (year && !c.createdAt.startsWith(String(year))) continue;
+    out.push({ bill: b, c });
+  }
+  return out.sort((x, y) => x.c.createdAt.localeCompare(y.c.createdAt));
+}
+
+function receiptView(user, bill, c) {
+  return {
+    id: c.id,
+    receiptNo: receiptNo(c),
+    date: c.createdAt,
+    amountCents: c.amountCents,
+    payer: { name: user.displayName, email: user.email },
+    payee: c.payee,
+    onBehalfOf: `${bill.name}${bill.city ? ", " + bill.city : ""}`,
+    billTitle: bill.title,
+    category: bill.category,
+    treatment: treatmentOf(bill),
+    anonymous: c.anonymous,
+  };
+}
+
+function taxSummary(user, year) {
+  const gifts = patronGifts(user, year);
+  const limit = exclusionFor(year);
+  const byRecipient = new Map();
+  for (const { bill, c } of gifts) {
+    const r = byRecipient.get(bill.ownerId) || { recipient: `${bill.name}${bill.city ? ", " + bill.city : ""}`, medicalCents: 0, giftCents: 0 };
+    if (treatmentOf(bill) === "medical") r.medicalCents += c.amountCents; else r.giftCents += c.amountCents;
+    byRecipient.set(bill.ownerId, r);
+  }
+  const recipients = [...byRecipient.values()].map((r) => ({ ...r, overExclusion: r.giftCents > limit, overByCents: Math.max(0, r.giftCents - limit) }));
+  const sum = (k) => recipients.reduce((s, r) => s + r[k], 0);
+  return {
+    year,
+    annualExclusionCents: limit,
+    totalCents: sum("medicalCents") + sum("giftCents"),
+    medicalCents: sum("medicalCents"),
+    giftCents: sum("giftCents"),
+    form709Likely: recipients.some((r) => r.overExclusion),
+    recipients,
+    receipts: gifts.map(({ bill, c }) => receiptView(user, bill, c)),
+    years: [...new Set(patronGifts(user).map(({ c }) => Number(c.createdAt.slice(0, 4))))].sort((a, b) => b - a),
+  };
+}
+
+function yearParam(url) {
+  const y = Number(url.searchParams.get("year") || new Date().getFullYear());
+  if (!Number.isInteger(y) || y < 2000 || y > 2100) throw new HttpError(400, "Invalid year");
+  return y;
+}
+
+function taxCsv(req, res, url) {
+  const user = requireUser(req, "patron");
+  const t = taxSummary(user, yearParam(url));
+  const cell = (v) => {
+    let s = String(v ?? "");
+    if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; // stop spreadsheet formula injection
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const rows = [["Receipt", "Date", "Amount (USD)", "Paid to", "On behalf of", "Bill", "Category", "Gift-tax treatment"]];
+  for (const r of t.receipts) {
+    rows.push([r.receiptNo, r.date.slice(0, 10), (r.amountCents / 100).toFixed(2), r.payee, r.onBehalfOf, r.billTitle, r.category,
+      r.treatment === "medical" ? "Medical paid directly to provider (IRC 2503(e))" : "Gift to individual (annual exclusion)"]);
+  }
+  res.writeHead(200, {
+    "Content-Type": "text/csv; charset=utf-8",
+    "Content-Disposition": `attachment; filename="billdrop-${t.year}-gifts.csv"`,
+    "Cache-Control": "private, no-store",
+  });
+  res.end(rows.map((r) => r.map(cell).join(",")).join("\r\n") + "\r\n");
+}
+
+// Shown in the settle sheet before paying, so the patron knows the tax picture up front.
+function taxPreview(req, id) {
+  const user = requireUser(req, "patron");
+  const bill = db.bills.find((b) => b.id === id && b.status === "verified");
+  if (!bill) throw new HttpError(404, "Bill not found");
+  const year = new Date().getFullYear();
+  let toRecipient = 0;
+  for (const { bill: b, c } of patronGifts(user, year)) {
+    if (b.ownerId === bill.ownerId && treatmentOf(b) === "gift") toRecipient += c.amountCents;
+  }
+  return { treatment: treatmentOf(bill), year, annualExclusionCents: exclusionFor(year), givenToRecipientThisYearCents: toRecipient };
 }
 
 // ---------- API: review ----------
@@ -729,6 +833,15 @@ async function api(req, res, url) {
 
   if (m === "GET" && p === "/api/my/bills") return send(res, 200, myBills(req));
   if (m === "GET" && p === "/api/my/giving") return send(res, 200, myGiving(req));
+  if (m === "GET" && p === "/api/my/tax") return send(res, 200, taxSummary(requireUser(req, "patron"), yearParam(url)));
+  if (m === "GET" && p === "/api/my/tax.csv") return taxCsv(req, res, url);
+  if ((match = p.match(/^\/api\/my\/receipts\/([\w-]+)$/)) && m === "GET") {
+    const user = requireUser(req, "patron");
+    const hit = patronGifts(user).find(({ c }) => c.id === match[1]);
+    if (!hit) throw new HttpError(404, "Receipt not found");
+    return send(res, 200, receiptView(user, hit.bill, hit.c));
+  }
+  if ((match = p.match(/^\/api\/bills\/([\w-]+)\/tax-preview$/)) && m === "GET") return send(res, 200, taxPreview(req, match[1]));
 
   if (m === "GET" && p === "/api/admin/queue") return send(res, 200, reviewQueue(req));
   if ((match = p.match(/^\/api\/admin\/bills\/([\w-]+)\/document$/)) && m === "GET") return serveDocument(req, res, match[1]);

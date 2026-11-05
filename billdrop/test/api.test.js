@@ -6,6 +6,7 @@ const path = require("node:path");
 
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "billdrop-"));
 process.env.ADMIN_EMAILS = "admin@test.dev";
+process.env.AUTH_ATTEMPTS_PER_10_MIN = "1000";
 const { server } = require("../server");
 
 let base;
@@ -182,4 +183,43 @@ test("the deck: patrons can pass on a bill and it stays gone until they reset", 
   assert.equal((await client()("POST", `/bills/${first[0].id}/pass`, {})).status, 401);
   await patron("POST", "/deck/reset", {});
   assert.equal((await patron("GET", "/deck")).data.length, first.length);
+});
+
+test("paperwork: receipts, medical vs gift treatment, per-recipient exclusion, CSV", async () => {
+  const admin = client();
+  await admin("POST", "/auth/login", { email: "admin@test.dev", password: "correct horse battery" });
+  const member = await signup("member", "Ada");
+  const { data: rent } = await member("POST", "/bills", billBody({ category: "rent", amount: "20000", biller: "Oak Apts" }));
+  const { data: med } = await member("POST", "/bills", billBody({ category: "medical", amount: "3000", biller: "City Hospital" }));
+  await admin("POST", `/admin/bills/${rent.id}/review`, { decision: "approve" });
+  await admin("POST", `/admin/bills/${med.id}/review`, { decision: "approve" });
+
+  const patron = await signup("patron", "Q");
+  const prev = (await patron("GET", `/bills/${rent.id}/tax-preview`)).data;
+  assert.equal(prev.treatment, "gift");
+  assert.equal(prev.annualExclusionCents, 1900000);
+
+  const paid = await patron("POST", `/bills/${rent.id}/pay`, { payInFull: true });
+  assert.match(paid.data.receipt.receiptNo, /^BD-\d{4}-[0-9A-F]{8}$/);
+  assert.equal(paid.data.receipt.payee, "Oak Apts");
+  await patron("POST", `/bills/${med.id}/pay`, { payInFull: true });
+
+  const year = new Date().getFullYear();
+  const tax = (await patron("GET", `/my/tax?year=${year}`)).data;
+  assert.equal(tax.medicalCents, 300000);
+  assert.equal(tax.giftCents, 2000000);
+  assert.equal(tax.form709Likely, true);
+  assert.equal(tax.recipients.length, 1);
+  assert.equal(tax.recipients[0].overByCents, 100000);
+  assert.equal(tax.recipients[0].recipient, "Ada, Austin, TX");
+
+  const receipt = (await patron("GET", `/my/receipts/${paid.data.receipt.id}`)).data;
+  assert.equal(receipt.amountCents, 2000000);
+  assert.equal((await (await signup("patron"))("GET", `/my/receipts/${paid.data.receipt.id}`)).status, 404, "other patrons can't see it");
+
+  const csv = await patron("GET", `/my/tax.csv?year=${year}`);
+  assert.equal(csv.status, 200);
+  assert.match(csv.data, /^Receipt,Date,Amount \(USD\)/);
+  assert.match(csv.data, /Medical paid directly to provider/);
+  assert.equal(csv.data.trim().split("\r\n").length, 3);
 });
