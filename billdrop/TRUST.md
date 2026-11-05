@@ -24,8 +24,12 @@ The table below shows what the prototype already enforces in code and what a rea
 | Community reports | ✅ 3 reports from different people pull a live bill back into review | |
 | Ban | ✅ "Reject & ban" suspends the account, ends its sessions and pulls its open bills | |
 | **ID verification of members** | ❌ Needed for launch | Stripe Identity or Persona. |
-| Payout queue to billers | ✅ Every gift becomes a payout record. A reviewer pays the biller and records the check number or confirmation | Pay to the biller's **official** address or portal, never one supplied by the member. |
-| **Automated biller payouts** | ❌ Needed for launch | e.g. Method Financial or another bill-pay API. |
+| Biller directory | ✅ Members choose billers from a directory; account-number formats are checked per biller | Stops invented "billers" that a scammer controls. |
+| Unlisted billers | ✅ Can't go live until a reviewer matches them to the directory or verifies a payment address independently | Paid by check only, to the verified address. |
+| Payout lanes with proof | ✅ Debt API / bill-pay network / virtual card / check, each with a confirmation step; failures retried by check or refunded | See README, "Getting money to billers". |
+| Account numbers | ✅ Stored encrypted (AES-256-GCM), masked everywhere, never shown to patrons | Use a managed key (KMS) in production. |
+| Card-dispute hold | ✅ Payouts wait 7 days before money leaves | Configurable with `PAYOUT_HOLD_DAYS`. |
+| **Live payout providers** | ❌ Needed for launch | The adapters in `payouts.js` are simulated: wire in Method, an RPPS originator (e.g. TabaPay, Cross River), Stripe Issuing and Lob. |
 | **Licensed partner holding funds** | ❌ Needed for launch | Holding patrons' money before paying billers can count as money transmission. Use a licensed partner (e.g. Stripe Treasury / a bill-pay provider) and get legal sign-off. |
 
 ## 2. Protecting members' identities
@@ -55,7 +59,7 @@ The threat: someone joins as a patron purely to collect names, locations and acc
 | Card payments | ✅ Stripe Payment Element (card data never touches BillDrop), test keys only; live keys refused |
 | Server-side payment verification | ✅ Gifts are recorded only after the server fetches the PaymentIntent from Stripe and checks status, amount and currency; recorded once; webhook signatures verified |
 | Over-payment races | ✅ If a bill was settled while a patron paid, the excess is refunded automatically |
-| Card fraud (stolen cards) | 🟡 Stripe Radar runs by default. **Needed:** a hold period (e.g. 7 days) before paying billers, so chargebacks land before money leaves |
+| Card fraud (stolen cards) | ✅ Stripe Radar plus the 7-day payout hold, so chargebacks land before money reaches a biller |
 | Money laundering via fake bills | ❌ Needed for launch: patron KYC above a threshold, velocity limits, and AML review of large settlements |
 
 ## 4. Taxes: what patrons can and can't claim

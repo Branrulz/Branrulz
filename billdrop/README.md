@@ -23,6 +23,8 @@ No dependencies, just Node 18+. Data lives in `billdrop/data/` (created and seed
 | `AUTH_ATTEMPTS_PER_10_MIN` | Sign-up/login rate limit per IP (default 20) |
 | `STRIPE_SECRET_KEY` / `STRIPE_PUBLISHABLE_KEY` | Turns on card payments (test keys only) |
 | `STRIPE_WEBHOOK_SECRET` | Verifies Stripe webhooks |
+| `PAYOUT_HOLD_DAYS` | Days to hold payouts before paying billers (default 7) |
+| `ACCOUNT_ENCRYPTION_KEY` | 32-byte base64 key for account numbers (dev: auto-generated in `data/`) |
 
 ## Card payments (Stripe test mode)
 
@@ -87,6 +89,25 @@ Live keys are refused unless `ALLOW_LIVE_PAYMENTS=1`. Don't set that until the l
 
 See **[TRUST.md](TRUST.md)** for the full fraud, identity-theft and tax write-up, including what's still needed before launch.
 
+## Getting money to billers
+
+Bills are owed to thousands of different companies, each with its own portal. BillDrop doesn't integrate with each one. Every biller is put into one of four **payment lanes**:
+
+| Lane | For | Provider (stand-in) | Proof of payment |
+| --- | --- | --- | --- |
+| Debt payment API | Credit cards, student & auto loans | Method | Lender reports the new balance (automatic) |
+| Bill-pay network | Utilities, phone, internet, many hospitals | Mastercard RPPS | No return from the network (automatic) |
+| Virtual card | Billers with a guest-pay page | Stripe Issuing | Staff pay on the biller's official site and record the confirmation number |
+| Mailed check | Everything else, including landlords | Lob | Check clears (staff), or the member confirms receipt |
+
+- **Biller directory:** members pick their biller from a searchable list (`billers.js`), which sets the lane and checks the account-number format ("Duke Energy account numbers are 12 digits"). A biller that isn't listed can still be submitted, but a reviewer must match it to a directory entry or enter a payment address they've verified themselves before the bill goes live. Unknown billers are paid by check only.
+- **Account numbers** are needed in full to pay, so they're stored encrypted (AES-256-GCM, key in `ACCOUNT_ENCRYPTION_KEY`), shown only as `…1234`, and never sent to patrons.
+- **Payout lifecycle:** `held` (7-day card-dispute hold, `PAYOUT_HOLD_DAYS`) → `sent` / `needs_agent` → `confirmed`. A payout can also go to `failed`, then **retry by check** or **refund the patron** (through Stripe when it was a card payment). A refund reopens the bill for that amount.
+- **Proof:** patrons see "✓ Duke Energy confirmed payment" on the bills they settled and on their receipts. Members see each payment's status and can tap "My biller received it".
+- **Reviewer desk → Payouts:** shows what needs a person (virtual-card payments, checks to confirm, failures) and what's on hold or in progress.
+
+The payout providers in `payouts.js` are **simulated**. Each adapter notes the real API it stands in for, so going live means replacing one function per lane.
+
 ## ⚠️ Prototype
 
 Card payments run in Stripe **test mode** (or simulated without keys). Paying billers is a manual step that reviewers record. Before taking real money: automated biller payouts (bill-pay API), a licensed partner to hold funds, ID verification for members and patrons, a real database, and a legal/CPA review. The details are in TRUST.md.
@@ -103,7 +124,9 @@ Card payments run in Stripe **test mode** (or simulated without keys). Paying bi
 | POST | `/api/bills/:id/payment-intent` · `/api/payments/:pi/confirm` (Stripe) or `/api/bills/:id/pay` (simulated) | patron |
 | POST | `/api/bills/:id/pass` · `/api/deck/reset` | patron |
 | POST | `/api/stripe/webhook` | Stripe (signed) |
-| GET | `/api/admin/payouts` · POST `/api/admin/payouts/:id/sent` | reviewer |
+| GET | `/api/billers?q=` | anyone |
+| POST | `/api/my/bills/:id/confirm-received` | member |
+| GET | `/api/admin/payouts` · POST `/api/admin/payouts/process` · POST `/api/admin/payouts/:id/(release\|agent-paid\|confirm\|fail\|retry-check\|refund)` | reviewer |
 | GET | `/api/bills/:id/tax-preview` · `/api/my/giving` · `/api/my/tax?year=` · `/api/my/tax.csv?year=` · `/api/my/receipts/:id` | patron |
 | POST | `/api/bills/:id/report` | signed in |
 | GET | `/api/admin/queue` · `/api/admin/bills/:id/document` · POST `/api/admin/bills/:id/review` | reviewer |

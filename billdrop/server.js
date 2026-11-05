@@ -18,6 +18,10 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const DB_FILE = path.join(DATA_DIR, "db.json");
 const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 const PUBLIC_DIR = path.join(__dirname, "public");
+const { LANES, BILLERS, ACCT, normalizeAccount, searchBillers, publicBiller } = require("./billers");
+const payoutProviders = require("./payouts");
+// Payouts wait this long after a patron pays, so card disputes (chargebacks) land before money leaves.
+const PAYOUT_HOLD_DAYS = Number(process.env.PAYOUT_HOLD_DAYS ?? 7);
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
 const COOKIE_SECURE = process.env.COOKIE_SECURE === "1";
 const AUTH_ATTEMPTS = Number(process.env.AUTH_ATTEMPTS_PER_10_MIN) || 20; // sign-ups + logins per IP
@@ -189,6 +193,62 @@ function rateLimit(key, max, windowMs) {
   hits.set(key, recent);
 }
 
+let db = null; // loaded below, after the helpers it needs
+
+// ---------- account-number encryption ----------
+// Paying a biller needs the member's full account number, so it's stored, but only encrypted
+// (AES-256-GCM). Set ACCOUNT_ENCRYPTION_KEY (32 bytes, base64) in production; in development a key
+// is generated into the data folder.
+
+function loadAccountKey() {
+  if (process.env.ACCOUNT_ENCRYPTION_KEY) {
+    const k = Buffer.from(process.env.ACCOUNT_ENCRYPTION_KEY, "base64");
+    if (k.length !== 32) throw new Error("ACCOUNT_ENCRYPTION_KEY must be 32 bytes, base64-encoded");
+    return k;
+  }
+  const file = path.join(DATA_DIR, "account.key");
+  try { return Buffer.from(fs.readFileSync(file, "utf8").trim(), "base64"); } catch {}
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const k = crypto.randomBytes(32);
+  fs.writeFileSync(file, k.toString("base64"), { mode: 0o600 });
+  return k;
+}
+const ACCOUNT_KEY = loadAccountKey();
+
+function encryptAccount(plain) {
+  const iv = crypto.randomBytes(12);
+  const c = crypto.createCipheriv("aes-256-gcm", ACCOUNT_KEY, iv);
+  const ct = Buffer.concat([c.update(String(plain), "utf8"), c.final()]);
+  return [iv, c.getAuthTag(), ct].map((b) => b.toString("base64")).join(".");
+}
+
+function decryptAccount(blob) {
+  const [iv, tag, ct] = String(blob).split(".").map((x) => Buffer.from(x, "base64"));
+  const d = crypto.createDecipheriv("aes-256-gcm", ACCOUNT_KEY, iv);
+  d.setAuthTag(tag);
+  return Buffer.concat([d.update(ct), d.final()]).toString("utf8");
+}
+
+const accountHash = (billerKey, acct) => sha256(`${billerKey}:${String(acct).toLowerCase()}`);
+
+// ---------- biller directory ----------
+
+const allBillers = () => [...BILLERS, ...(db?.customBillers || [])];
+function findBiller(id) {
+  const b = allBillers().find((x) => x.id === id);
+  if (!b) return null;
+  const extraRemit = db?.billerRemits?.[id]; // a reviewer-verified address for a directory biller
+  return extraRemit && !b.remit ? { ...b, remit: extraRemit } : b;
+}
+
+function sampleAccount(biller) {
+  for (const n of [16, 12, 10, 9]) {
+    const d = Array.from({ length: n }, () => crypto.randomInt(10)).join("");
+    if (new RegExp(biller.account.pattern).test(d)) return d;
+  }
+  return "A" + Array.from({ length: 8 }, () => crypto.randomInt(10)).join("");
+}
+
 // ---------- storage ----------
 
 function seed() {
@@ -206,44 +266,62 @@ function seed() {
   const margaux = user("Margaux V.", "patron", "margaux@seed.billdrop.invalid");
   const yacht = user("Anonymous Yacht Owner", "patron", "yacht@seed.billdrop.invalid");
 
-  const bill = (owner, title, story, category, amountCents, biller, city, daysAgo, dueInDays) => ({
-    id: uuid(), ownerId: owner.id, title, story, category, amountCents, biller, name: owner.displayName, city,
-    accountLast4: String(1000 + Math.floor(Math.random() * 9000)),
-    document: null, status: "verified", reviewNote: "", reports: [],
-    createdAt: iso(daysAgo), verifiedAt: iso(daysAgo),
-    dueDate: dueInDays == null ? null : new Date(now + dueInDays * day).toISOString().slice(0, 10),
-    contributions: [],
-  });
-  const give = (b, patron, amountCents, message, daysAgo) => b.contributions.push({
-    id: uuid(), patronId: patron.id, patronName: patron.displayName, anonymous: false,
-    amountCents, message, payee: b.biller, createdAt: iso(daysAgo),
-  });
+  const bill = (owner, title, story, category, amountCents, billerId, city, daysAgo, dueInDays) => {
+    const biller = BILLERS.find((x) => x.id === billerId);
+    const acct = sampleAccount(biller);
+    return {
+      id: uuid(), ownerId: owner.id, title, story, category, amountCents, biller: biller.name, billerId,
+      accountEnc: encryptAccount(acct), accountHash: accountHash(billerId, acct), accountLast4: acct.slice(-4),
+      name: owner.displayName, city,
+      document: null, status: "verified", reviewNote: "", reports: [],
+      createdAt: iso(daysAgo), verifiedAt: iso(daysAgo),
+      dueDate: dueInDays == null ? null : new Date(now + dueInDays * day).toISOString().slice(0, 10),
+      contributions: [],
+    };
+  };
+  const payouts = [];
+  const give = (b, patron, amountCents, message, daysAgo) => {
+    const c = { id: uuid(), patronId: patron.id, patronName: patron.displayName, anonymous: false,
+      amountCents, feeCents: 0, paymentId: null, message, payee: b.biller, createdAt: iso(daysAgo) };
+    b.contributions.push(c);
+    const p = newPayout(b, c);
+    if (daysAgo > PAYOUT_HOLD_DAYS + 3) { // old history: already paid and confirmed
+      const lane = p.lane;
+      Object.assign(p, { status: "confirmed", provider: LANES[lane].provider, reference: lane === "check" ? "Check #104" + payouts.length : "sample-ref",
+        sentAt: iso(daysAgo - PAYOUT_HOLD_DAYS), confirmedAt: iso(daysAgo - PAYOUT_HOLD_DAYS - 2),
+        proof: { source: "provider", detail: "Confirmed by provider", at: iso(daysAgo - PAYOUT_HOLD_DAYS - 2) } });
+      p.events.push({ at: p.sentAt, status: "sent", note: "Sent" }, { at: p.confirmedAt, status: "confirmed", note: "Confirmed by provider" });
+    }
+    payouts.push(p);
+  };
 
   const [dana, marcus, priya, keisha, tom, alma, jordan, ruth] = members;
   const bills = [
-    bill(dana, "ER visit after a bike crash", "Broke my wrist commuting to work. Insurance covered some, this is what's left.", "medical", 184250, "St. Mary's Hospital", "Tulsa, OK", 3, 21),
-    bill(marcus, "Behind one month on rent", "Hours got cut at the warehouse. Back to full time next month but I'm short for November.", "rent", 95000, "Oakview Apartments", "Dayton, OH", 1, 6),
-    bill(priya, "Last chunk of my student loan", "Been paying for 11 years. This is the final balance — would love to be done.", "student-loan", 412075, "Nelnet", "Fresno, CA", 6, null),
-    bill(keisha, "Power bill before shutoff", "Got the disconnect notice. Two kids at home.", "utilities", 31244, "Duke Energy", "Greenville, SC", 0, 4),
-    bill(tom, "Transmission died", "Need the car to get to my nursing shifts.", "car", 260000, "Mike's Auto Repair", "Boise, ID", 2, 14),
+    bill(dana, "ER visit after a bike crash", "Broke my wrist commuting to work. Insurance covered some, this is what's left.", "medical", 184250, "st-marys", "Tulsa, OK", 3, 21),
+    bill(marcus, "Behind one month on rent", "Hours got cut at the warehouse. Back to full time next month but I'm short for November.", "rent", 95000, "oakview-apartments", "Dayton, OH", 1, 6),
+    bill(priya, "Last chunk of my student loan", "Been paying for 11 years. This is the final balance — would love to be done.", "student-loan", 412075, "nelnet", "Fresno, CA", 6, null),
+    bill(keisha, "Power bill before shutoff", "Got the disconnect notice. Two kids at home.", "utilities", 31244, "duke-energy", "Greenville, SC", 0, 4),
+    bill(tom, "Transmission died", "Need the car to get to my nursing shifts.", "car", 260000, "mikes-auto", "Boise, ID", 2, 14),
     // Settled history, so the Circle and tiers have something to show.
-    bill(alma, "NICU stay for our twins", "Born at 31 weeks. They're home and healthy now; the bill followed us.", "medical", 2480000, "Children's Mercy Hospital", "Kansas City, MO", 40, null),
-    bill(jordan, "My mother's funeral", "She deserved a proper goodbye. I put the balance on a payment plan.", "other", 940000, "Greenlawn Funeral Home", "Mobile, AL", 30, null),
-    bill(ruth, "Student loan, final balance", "Nineteen years of payments. Teacher salary.", "student-loan", 1850000, "MOHELA", "Burlington, VT", 25, null),
+    bill(alma, "NICU stay for our twins", "Born at 31 weeks. They're home and healthy now; the bill followed us.", "medical", 2480000, "childrens-mercy", "Kansas City, MO", 40, null),
+    bill(jordan, "My mother's funeral", "She deserved a proper goodbye. I put the balance on a payment plan.", "other", 940000, "greenlawn", "Mobile, AL", 30, null),
+    bill(ruth, "Student loan, final balance", "Nineteen years of payments. Teacher salary.", "student-loan", 1850000, "mohela", "Burlington, VT", 25, null),
   ];
   give(bills[3], yacht, 10000, "Keep the lights on.", 0.05);
   give(bills[5], duke, 2480000, "Welcome to the world, little ones.", 38);
   give(bills[6], duke, 940000, "With deepest sympathy.", 28);
   give(bills[7], margaux, 1850000, "Class dismissed.", 22);
 
-  return { users: [...members, duke, margaux, yacht], sessions: {}, bills, payments: {}, payouts: [] };
+  return { version: DB_VERSION, users: [...members, duke, margaux, yacht], sessions: {}, bills, payments: {}, payouts, customBillers: [], billerRemits: {} };
 }
+
+const DB_VERSION = 2; // 2: biller directory, encrypted account numbers, payout lanes
 
 function load() {
   try {
     const data = JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
-    if (Array.isArray(data.users)) return { payments: {}, payouts: [], ...data };
-    // Pre-accounts prototype data: start fresh.
+    if (data.version === DB_VERSION) return data;
+    console.log("Data from an older prototype version found; starting fresh with sample data.");
   } catch (err) {
     if (err.code !== "ENOENT") throw err;
   }
@@ -259,16 +337,17 @@ function save(data = db) {
   fs.renameSync(tmp, DB_FILE);
 }
 
-let db = load();
+db = load();
 
 // ---------- derived data ----------
 
-const paidCents = (b) => b.contributions.reduce((s, c) => s + c.amountCents, 0);
+const isLive = (c) => !c.refunded; // refunded gifts no longer count anywhere
+const paidCents = (b) => b.contributions.filter(isLive).reduce((s, c) => s + c.amountCents, 0);
 const isPaidOff = (b) => paidCents(b) >= b.amountCents;
 
 function givenBy(userId) {
   let total = 0;
-  for (const b of db.bills) for (const c of b.contributions) if (c.patronId === userId) total += c.amountCents;
+  for (const b of db.bills) for (const c of b.contributions) if (c.patronId === userId && isLive(c)) total += c.amountCents;
   return total;
 }
 
@@ -298,23 +377,57 @@ function publicBill(b) {
     verified: b.status === "verified",
     amountCents: b.amountCents, paidCents: paid,
     remainingCents: Math.max(0, b.amountCents - paid), paidOff: paid >= b.amountCents,
-    contributions: b.contributions.map(contributionView),
+    contributions: b.contributions.filter(isLive).map(contributionView),
+    payment: billPaymentStatus(b),
+  };
+}
+
+// Has the money actually reached the biller? Shown publicly as "Biller confirmed payment".
+function billPaymentStatus(b) {
+  const ps = db.payouts.filter((p) => p.billId === b.id && p.status !== "refunded");
+  if (!ps.length) return null;
+  const confirmedCents = ps.filter((p) => p.status === "confirmed").reduce((s, p) => s + p.amountCents, 0);
+  const total = ps.reduce((s, p) => s + p.amountCents, 0);
+  return { confirmedCents, totalCents: total, state: confirmedCents >= total ? "confirmed" : "in_progress" };
+}
+
+const LANE_LABEL = (lane) => LANES[lane]?.name || lane;
+const PAYOUT_STATUS = {
+  held: "Waiting out the card-dispute hold", sent: "On its way to the biller", needs_agent: "Being paid on the biller's site",
+  confirmed: "Biller confirmed payment", failed: "Payment problem — being resolved", refunded: "Refunded to the patron",
+};
+// What a member or patron may see about a payout. Never the full account number or card details.
+function payoutPublicView(p) {
+  if (!p) return null;
+  return {
+    status: p.status, statusText: PAYOUT_STATUS[p.status], lane: p.lane, laneName: LANE_LABEL(p.lane), provider: p.provider,
+    amountCents: p.amountCents, reference: ["sent", "confirmed"].includes(p.status) ? p.reference : "",
+    releaseAt: p.status === "held" ? p.releaseAt : null, confirmedAt: p.confirmedAt, proof: p.proof?.detail || null,
   };
 }
 
 // What the member who posted it can see.
 function ownerBill(b) {
-  return { ...publicBill(b), status: b.status, reviewNote: b.reviewNote, accountLast4: b.accountLast4 };
+  const biller = findBiller(b.billerId);
+  return {
+    ...publicBill(b), status: b.status, reviewNote: b.reviewNote, accountLast4: b.accountLast4,
+    billerId: b.billerId, laneName: biller ? LANE_LABEL(biller.lane) : "Verified by a reviewer before going live",
+    payouts: db.payouts.filter((p) => p.billId === b.id).map(payoutPublicView),
+  };
 }
 
 // What a reviewer sees, including fraud signals.
 function adminBill(b) {
   const owner = db.users.find((u) => u.id === b.ownerId);
-  const sameAccount = db.bills.filter((o) => o.id !== b.id && o.ownerId !== b.ownerId &&
-    normalize(o.biller) === normalize(b.biller) && o.accountLast4 === b.accountLast4);
+  const sameAccount = db.bills.filter((o) => o.id !== b.id && o.ownerId !== b.ownerId && o.accountHash === b.accountHash);
+  const biller = findBiller(b.billerId);
   const ownerHistory = db.bills.filter((o) => o.ownerId === b.ownerId && o.id !== b.id);
   return {
     ...ownerBill(b),
+    billerInfo: biller
+      ? { id: biller.id, name: biller.name, lane: biller.lane, laneName: LANE_LABEL(biller.lane), remit: biller.remit || null, custom: Boolean(biller.custom) }
+      : null,
+    directory: biller ? undefined : allBillers().map((x) => ({ id: x.id, name: x.name })),
     hasDocument: Boolean(b.document?.file),
     documentName: b.document?.name || null,
     reports: b.reports.map((r) => ({ reason: r.reason, details: r.details, createdAt: r.createdAt })),
@@ -324,7 +437,8 @@ function adminBill(b) {
       rejectedBills: ownerHistory.filter((o) => o.status === "rejected").length,
     },
     signals: [
-      ...sameAccount.map((o) => `Same biller and account (…${b.accountLast4}) as another member's bill: “${o.title}” (${o.status})`),
+      ...(!biller ? ["Biller isn't in the directory — map it to one, or verify its payment address yourself"] : []),
+      ...sameAccount.map((o) => `Same biller and full account number (…${b.accountLast4}) as another member's bill: “${o.title}” (${o.status})`),
       ...(owner && Date.now() - Date.parse(owner.createdAt) < 86400000 ? ["Account is less than a day old"] : []),
       ...(b.amountCents >= 10_000_00 ? ["Large amount — confirm with the biller directly"] : []),
       ...(!b.document?.file ? ["No statement on file"] : []),
@@ -480,7 +594,7 @@ function stats() {
   const live = db.bills.filter((b) => b.status === "verified");
   const totals = new Map(); // patronId -> named giving (anonymous gifts count toward tier, not the public board)
   for (const b of live) for (const c of b.contributions) {
-    if (!c.anonymous) totals.set(c.patronId, (totals.get(c.patronId) || 0) + c.amountCents);
+    if (!c.anonymous && isLive(c)) totals.set(c.patronId, (totals.get(c.patronId) || 0) + c.amountCents);
   }
   const leaderboard = [...totals.entries()]
     .map(([id, amountCents]) => {
@@ -515,8 +629,22 @@ async function createBill(req, res) {
     }
     dueDate = body.dueDate;
   }
-  const accountLast4 = str(body.accountLast4, "Last 4 of the account number", { max: 4 });
-  if (!/^\d{4}$/.test(accountLast4)) throw new HttpError(400, "Enter the last 4 digits of the account number on your statement");
+  // Biller: from the directory, or "other" (a reviewer must verify it before the bill goes live).
+  let biller = null, billerName;
+  if (body.billerId && body.billerId !== "other") {
+    biller = findBiller(String(body.billerId));
+    if (!biller) throw new HttpError(400, "Choose your biller from the list, or pick “Not listed”");
+    billerName = biller.name;
+  } else {
+    billerName = assertNoPII(str(body.billerName, "Who the bill is owed to", { min: 2, max: 80 }), "Biller name");
+  }
+  const accountNumber = normalizeAccount(str(body.accountNumber, "Account number", { max: 40 }));
+  const pattern = new RegExp(biller ? biller.account.pattern : ACCT.generic.pattern);
+  if (!pattern.test(accountNumber)) {
+    throw new HttpError(400, biller
+      ? `That doesn't look like a ${biller.name} account number (${biller.account.hint})`
+      : "Enter the account number from your statement (letters and digits)");
+  }
 
   const bill = {
     id: uuid(),
@@ -525,8 +653,11 @@ async function createBill(req, res) {
     story: assertNoPII(str(body.story, "Story", { min: 10, max: 1000 }), "Story"),
     category,
     amountCents: cents(body.amount, "Amount", { min: 100, max: POLICY.maxBillCents }),
-    biller: str(body.biller, "Who the bill is owed to", { min: 2, max: 80 }),
-    accountLast4,
+    biller: billerName,
+    billerId: biller ? biller.id : null,
+    accountEnc: encryptAccount(accountNumber),
+    accountHash: accountHash(biller ? biller.id : "name:" + normalize(billerName), accountNumber),
+    accountLast4: accountNumber.slice(-4),
     name: user.displayName.split(/\s+/)[0], // first name only, ever
     city: assertNoPII(str(body.city, "City or region", { max: 60, required: false }), "City or region"),
     dueDate,
@@ -587,12 +718,57 @@ function recordContribution(user, bill, amountCents, { anonymous, message, payme
     createdAt: new Date().toISOString(),
   };
   bill.contributions.push(c);
-  // Every contribution becomes a payout owed to the biller.
-  db.payouts.push({
-    id: uuid(), billId: bill.id, contributionId: c.id, biller: bill.biller, accountLast4: bill.accountLast4,
-    amountCents, status: "queued", reference: "", createdAt: c.createdAt, sentAt: null,
-  });
+  db.payouts.push(newPayout(bill, c)); // every gift becomes a payout owed to the biller
   return c;
+}
+
+// ---------- payouts: routing money to billers ----------
+
+function newPayout(bill, c) {
+  const lane = findBiller(bill.billerId)?.lane || "check";
+  const releaseAt = new Date(Date.parse(c.createdAt) + PAYOUT_HOLD_DAYS * 86400000).toISOString();
+  return {
+    id: uuid(), billId: bill.id, contributionId: c.id, billerId: bill.billerId, biller: bill.biller, accountLast4: bill.accountLast4,
+    lane, provider: LANES[lane].provider, amountCents: c.amountCents, status: "held", releaseAt,
+    reference: "", detail: "", card: null, autoConfirm: false, proof: null,
+    createdAt: c.createdAt, sentAt: null, confirmedAt: null,
+    events: [{ at: c.createdAt, status: "held", note: PAYOUT_HOLD_DAYS ? `Held ${PAYOUT_HOLD_DAYS} days so card disputes land before money leaves` : "Ready to send" }],
+  };
+}
+
+function setPayoutStatus(p, status, note) {
+  p.status = status;
+  p.events.push({ at: new Date().toISOString(), status, note: note || "" });
+}
+
+function dispatchPayout(p, lane = p.lane) {
+  const bill = db.bills.find((b) => b.id === p.billId);
+  const biller = findBiller(p.billerId);
+  if (!bill || !biller) return setPayoutStatus(p, "failed", "Biller or bill missing");
+  const r = payoutProviders.dispatch(lane, { payout: p, biller, accountNumber: decryptAccount(bill.accountEnc) });
+  Object.assign(p, { lane, provider: r.provider, reference: r.reference, detail: r.detail, card: r.card || null, autoConfirm: Boolean(r.autoConfirm) });
+  if (r.status === "sent") p.sentAt = new Date().toISOString();
+  setPayoutStatus(p, r.status, r.detail);
+}
+
+function confirmPayout(p, source, detail) {
+  p.proof = { source, detail, at: new Date().toISOString() };
+  p.confirmedAt = p.proof.at;
+  p.autoConfirm = false;
+  p.card = null; // single-use card is spent; don't keep showing it
+  setPayoutStatus(p, "confirmed", detail);
+}
+
+// Runs on a timer (and on demand): releases held payouts and records provider confirmations.
+function processPayouts() {
+  let changed = false;
+  const now = Date.now();
+  for (const p of db.payouts) {
+    if (p.status === "held" && Date.parse(p.releaseAt) <= now) { dispatchPayout(p); changed = true; }
+    else if (p.status === "sent" && p.autoConfirm) { confirmPayout(p, "provider", payoutProviders.providerConfirmation(p)); changed = true; }
+  }
+  if (changed) save();
+  return changed;
 }
 
 function paidResponse(user, bill, c) {
@@ -750,24 +926,108 @@ async function stripeWebhook(req, res) {
 
 // ---------- reviewer: payouts owed to billers ----------
 
-function listPayouts(req) {
-  requireUser(req, "admin");
-  return db.payouts.slice().sort((a, b) => (a.status === "queued" ? 0 : 1) - (b.status === "queued" ? 0 : 1) || b.createdAt.localeCompare(a.createdAt))
-    .slice(0, 200).map((p) => ({ ...p, billTitle: db.bills.find((b) => b.id === p.billId)?.title || "" }));
+function adminPayoutView(p) {
+  const bill = db.bills.find((b) => b.id === p.billId);
+  const biller = findBiller(p.billerId);
+  return {
+    ...p, billTitle: bill?.title || "", remit: biller?.remit || null,
+    card: p.status === "needs_agent" ? p.card : null, // single-use card details only while needed
+    needsAction: ["needs_agent", "failed"].includes(p.status) || (p.status === "sent" && !p.autoConfirm),
+  };
 }
 
-async function markPayoutSent(req, res, id) {
+function listPayouts(req) {
+  requireUser(req, "admin");
+  processPayouts();
+  const order = { needs_agent: 0, failed: 1, sent: 2, held: 3, confirmed: 4, refunded: 5 };
+  return db.payouts.slice()
+    .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || b.createdAt.localeCompare(a.createdAt))
+    .slice(0, 300).map(adminPayoutView);
+}
+
+function remitFrom(body) {
+  const r = body || {};
+  const remit = {
+    name: str(r.name, "Payee name", { min: 2, max: 80 }),
+    line1: str(r.line1, "Street or PO box", { min: 3, max: 80 }),
+    city: str(r.city, "City", { min: 2, max: 40 }),
+    state: str(r.state, "State", { min: 2, max: 2 }).toUpperCase(),
+    zip: str(r.zip, "ZIP", { min: 5, max: 10 }),
+  };
+  if (!/^[A-Z]{2}$/.test(remit.state)) throw new HttpError(400, "State must be a 2-letter code");
+  if (!/^\d{5}(-\d{4})?$/.test(remit.zip)) throw new HttpError(400, "ZIP must be 5 digits");
+  return remit;
+}
+
+async function payoutAction(req, res, id, action) {
   const admin = requireUser(req, "admin");
   const body = await readJson(req);
   const p = db.payouts.find((x) => x.id === id);
   if (!p) throw new HttpError(404, "Payout not found");
-  if (p.status !== "queued") throw new HttpError(409, "Already marked as sent");
-  p.reference = str(body.reference, "Payment reference (check no. or confirmation)", { min: 3, max: 80 });
-  p.status = "sent";
-  p.sentAt = new Date().toISOString();
-  p.sentBy = admin.id;
+  const need = (...states) => { if (!states.includes(p.status)) throw new HttpError(409, `Can't do that while the payout is ${p.status}`); };
+
+  if (action === "release") {
+    need("held");
+    p.events.push({ at: new Date().toISOString(), status: "held", note: `Hold released early by a reviewer` });
+    dispatchPayout(p);
+  } else if (action === "agent-paid") {
+    need("needs_agent");
+    const conf = str(body.confirmation, "Confirmation number from the biller's site", { min: 3, max: 80 });
+    p.reference = conf;
+    confirmPayout(p, "agent", `Paid on the biller's site · confirmation ${conf}`);
+  } else if (action === "confirm") {
+    need("sent");
+    confirmPayout(p, "staff", str(body.note, "How it was confirmed (e.g. check cleared)", { min: 3, max: 120 }));
+  } else if (action === "fail") {
+    need("sent", "needs_agent");
+    p.card = null;
+    setPayoutStatus(p, "failed", str(body.reason, "What went wrong", { min: 3, max: 200 }));
+  } else if (action === "retry-check") {
+    need("failed");
+    const biller = findBiller(p.billerId);
+    if (!biller) throw new HttpError(409, "Biller missing");
+    if (!biller.remit) {
+      if (!body.remit) throw new HttpError(400, "This biller has no verified payment address yet. Add one you've verified yourself.");
+      db.billerRemits ||= {};
+      db.billerRemits[biller.id] = { ...remitFrom(body.remit), verifiedBy: admin.id, verifiedAt: new Date().toISOString() };
+    }
+    p.events.push({ at: new Date().toISOString(), status: "failed", note: "Retrying as a mailed check" });
+    dispatchPayout(p, "check");
+  } else if (action === "refund") {
+    need("held", "failed", "needs_agent");
+    await refundContribution(p);
+  } else {
+    throw new HttpError(404, "Unknown action");
+  }
+  p.lastActionBy = admin.id;
   save();
-  send(res, 200, p);
+  send(res, 200, adminPayoutView(p));
+}
+
+// Gives the patron their money back when a payout can't be completed. The bill reopens for that amount.
+async function refundContribution(p) {
+  const bill = db.bills.find((b) => b.id === p.billId);
+  const c = bill?.contributions.find((x) => x.id === p.contributionId);
+  if (!c || c.refunded) throw new HttpError(409, "Already refunded");
+  if (c.paymentId && STRIPE.enabled) {
+    await stripeApi("POST", "/v1/refunds", { payment_intent: c.paymentId, amount: String(c.amountCents + (c.feeCents || 0)) }, `payout-refund-${p.id}`);
+  }
+  c.refunded = true;
+  c.refundedAt = new Date().toISOString();
+  p.card = null;
+  setPayoutStatus(p, "refunded", c.paymentId ? "Refunded to the patron's card" : "Refunded to the patron");
+}
+
+// A member can confirm their biller received a payment (e.g. their next statement shows it).
+function memberConfirmReceived(req, res, billId) {
+  const user = requireUser(req, "member");
+  const bill = db.bills.find((b) => b.id === billId && b.ownerId === user.id);
+  if (!bill) throw new HttpError(404, "Bill not found");
+  const sent = db.payouts.filter((p) => p.billId === bill.id && p.status === "sent");
+  if (!sent.length) throw new HttpError(409, "There's no payment on its way to confirm yet");
+  for (const p of sent) confirmPayout(p, "member", "Member confirmed the biller received the payment");
+  save();
+  send(res, 200, ownerBill(bill));
 }
 
 async function reportBill(req, res, id) {
@@ -830,7 +1090,10 @@ function myGiving(req) {
   const user = requireUser(req, "patron");
   const out = [];
   for (const b of db.bills) for (const c of b.contributions) {
-    if (c.patronId === user.id) out.push({ ...contributionView(c), anonymous: c.anonymous, billId: b.id, billTitle: b.title, billPaidOff: isPaidOff(b) });
+    if (c.patronId === user.id) {
+      out.push({ ...contributionView(c), anonymous: c.anonymous, refunded: Boolean(c.refunded), billId: b.id, billTitle: b.title, billPaidOff: isPaidOff(b),
+        payout: payoutPublicView(db.payouts.find((p) => p.contributionId === c.id)) });
+    }
   }
   return out.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
@@ -843,7 +1106,7 @@ const treatmentOf = (bill) => (bill.category === "medical" ? "medical" : "gift")
 function patronGifts(user, year) {
   const out = [];
   for (const b of db.bills) for (const c of b.contributions) {
-    if (c.patronId !== user.id) continue;
+    if (c.patronId !== user.id || !isLive(c)) continue;
     if (year && !c.createdAt.startsWith(String(year))) continue;
     out.push({ bill: b, c });
   }
@@ -865,6 +1128,7 @@ function receiptView(user, bill, c) {
     category: bill.category,
     treatment: treatmentOf(bill),
     anonymous: c.anonymous,
+    payout: payoutPublicView(db.payouts.find((p) => p.contributionId === c.id)),
   };
 }
 
@@ -977,6 +1241,28 @@ async function review(req, res, id) {
   const note = str(body.note, "Note", { max: 500, required: false });
 
   if (body.decision === "approve") {
+    if (!findBiller(bill.billerId)) {
+      if (body.billerId) {
+        const target = findBiller(String(body.billerId));
+        if (!target) throw new HttpError(400, "Unknown directory biller");
+        if (!new RegExp(target.account.pattern).test(decryptAccount(bill.accountEnc))) {
+          throw new HttpError(400, `The account number doesn't match ${target.name}'s format (${target.account.hint})`);
+        }
+        bill.billerId = target.id;
+        bill.biller = target.name;
+      } else if (body.remit) {
+        const custom = {
+          id: "custom-" + uuid().slice(0, 8), name: bill.biller, category: bill.category, lane: "check", account: ACCT.generic,
+          remit: remitFrom(body.remit), custom: true, verifiedBy: admin.id, verifiedAt: new Date().toISOString(),
+        };
+        db.customBillers ||= [];
+        db.customBillers.push(custom);
+        bill.billerId = custom.id;
+      } else {
+        throw new HttpError(400, "This biller isn't in the directory. Map it to a directory biller, or enter a payment address you've verified.");
+      }
+      bill.accountHash = accountHash(bill.billerId, decryptAccount(bill.accountEnc));
+    }
     bill.status = "verified";
     bill.verifiedAt = new Date().toISOString();
     bill.reports = []; // reviewed; start counting fresh
@@ -1022,8 +1308,13 @@ async function api(req, res, url) {
   }
   if (m === "POST" && p === "/api/stripe/webhook") return stripeWebhook(req, res);
   if ((match = p.match(/^\/api\/payments\/([\w-]+)\/confirm$/)) && m === "POST") return confirmPayment(req, res, match[1]);
+  if (m === "GET" && p === "/api/billers") return send(res, 200, searchBillers(allBillers(), url.searchParams.get("q")).map(publicBiller));
   if (m === "GET" && p === "/api/admin/payouts") return send(res, 200, listPayouts(req));
-  if ((match = p.match(/^\/api\/admin\/payouts\/([\w-]+)\/sent$/)) && m === "POST") return markPayoutSent(req, res, match[1]);
+  if (m === "POST" && p === "/api/admin/payouts/process") { requireUser(req, "admin"); processPayouts(); return send(res, 200, { ok: true }); }
+  if ((match = p.match(/^\/api\/admin\/payouts\/([\w-]+)\/(release|agent-paid|confirm|fail|retry-check|refund)$/)) && m === "POST") {
+    return payoutAction(req, res, match[1], match[2]);
+  }
+  if ((match = p.match(/^\/api\/my\/bills\/([\w-]+)\/confirm-received$/)) && m === "POST") return memberConfirmReceived(req, res, match[1]);
 
   if (m === "POST" && p === "/api/auth/signup") return signup(req, res);
   if (m === "POST" && p === "/api/auth/login") return login(req, res);
@@ -1107,6 +1398,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 if (require.main === module) {
+  setInterval(processPayouts, 30_000).unref(); // release held payouts and record confirmations
+  processPayouts();
   server.listen(PORT, () => {
     console.log(`BillDrop running at http://localhost:${PORT}`);
     if (!ADMIN_EMAILS.length) console.log("Tip: set ADMIN_EMAILS=you@example.com to get a reviewer account when you sign up with that email.");
@@ -1114,4 +1407,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, POLICY, TIERS, chargeFor };
+module.exports = { server, POLICY, TIERS, chargeFor, processPayouts };

@@ -7,6 +7,7 @@ const path = require("node:path");
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "billdrop-"));
 process.env.ADMIN_EMAILS = "admin@test.dev";
 process.env.AUTH_ATTEMPTS_PER_10_MIN = "1000";
+process.env.PAYOUT_HOLD_DAYS = "0";
 const { server } = require("../server");
 
 let base;
@@ -42,7 +43,7 @@ const pdf = (tag = Math.random()) => ({ name: "statement.pdf", data: Buffer.from
 
 const billBody = (over = {}) => ({
   title: "Dentist bill", story: "Cracked a molar on a popcorn kernel.", category: "medical", amount: "250.50",
-  biller: "Smile Dental", accountLast4: "4821", city: "Austin, TX", attest: true, document: pdf(), ...over,
+  billerId: "st-marys", accountNumber: "PT-" + Math.floor(1e6 + Math.random() * 9e6), city: "Austin, TX", attest: true, document: pdf(), ...over,
 });
 
 test("public feed shows only verified bills, without private fields", async () => {
@@ -53,6 +54,8 @@ test("public feed shows only verified bills, without private fields", async () =
   for (const b of data) {
     assert.equal(b.verified, true);
     assert.equal(b.accountLast4, undefined);
+    assert.equal(b.accountEnc, undefined);
+    assert.equal(b.accountHash, undefined);
     assert.equal(b.ownerId, undefined);
     assert.equal(b.document, undefined);
   }
@@ -98,7 +101,7 @@ test("bills stay hidden until a reviewer approves them, then patrons can settle 
 
   const r1 = await patron("POST", `/bills/${bill.id}/pay`, { amount: 1500 });
   assert.equal(r1.data.tier.id, "bronze");
-  assert.equal(r1.data.bill.contributions[0].payee, "Smile Dental");
+  assert.equal(r1.data.bill.contributions[0].payee, "St. Mary's Hospital");
   const r2 = await patron("POST", `/bills/${bill.id}/pay`, { payInFull: true, anonymous: true });
   assert.equal(r2.data.bill.paidOff, true);
   assert.equal(r2.data.tier.id, "silver"); // $12,000 lifetime
@@ -117,7 +120,7 @@ test("fraud controls: duplicate statements, caps, active-bill limit, attestation
   assert.equal((await member("POST", "/bills", billBody({ attest: false }))).status, 400);
   assert.equal((await member("POST", "/bills", billBody({ document: { name: "x.pdf", data: Buffer.from("<html>" + "x".repeat(200)).toString("base64") } }))).status, 400);
   assert.equal((await member("POST", "/bills", billBody({ amount: "999999" }))).status, 400);
-  assert.equal((await member("POST", "/bills", billBody({ accountLast4: "12" }))).status, 400);
+  assert.equal((await member("POST", "/bills", billBody({ accountNumber: "12" }))).status, 400);
 
   assert.equal((await member("POST", "/bills", billBody({ document: doc }))).status, 201);
   const other = await signup("member");
@@ -189,8 +192,8 @@ test("paperwork: receipts, medical vs gift treatment, per-recipient exclusion, C
   const admin = client();
   await admin("POST", "/auth/login", { email: "admin@test.dev", password: "correct horse battery" });
   const member = await signup("member", "Ada");
-  const { data: rent } = await member("POST", "/bills", billBody({ category: "rent", amount: "20000", biller: "Oak Apts" }));
-  const { data: med } = await member("POST", "/bills", billBody({ category: "medical", amount: "3000", biller: "City Hospital" }));
+  const { data: rent } = await member("POST", "/bills", billBody({ category: "rent", amount: "20000", billerId: "oakview-apartments" }));
+  const { data: med } = await member("POST", "/bills", billBody({ category: "medical", amount: "3000", billerId: "st-marys" }));
   await admin("POST", `/admin/bills/${rent.id}/review`, { decision: "approve" });
   await admin("POST", `/admin/bills/${med.id}/review`, { decision: "approve" });
 
@@ -201,7 +204,7 @@ test("paperwork: receipts, medical vs gift treatment, per-recipient exclusion, C
 
   const paid = await patron("POST", `/bills/${rent.id}/pay`, { payInFull: true });
   assert.match(paid.data.receipt.receiptNo, /^BD-\d{4}-[0-9A-F]{8}$/);
-  assert.equal(paid.data.receipt.payee, "Oak Apts");
+  assert.equal(paid.data.receipt.payee, "Oakview Apartments");
   await patron("POST", `/bills/${med.id}/pay`, { payInFull: true });
 
   const year = new Date().getFullYear();
@@ -222,4 +225,118 @@ test("paperwork: receipts, medical vs gift treatment, per-recipient exclusion, C
   assert.match(csv.data, /^Receipt,Date,Amount \(USD\)/);
   assert.match(csv.data, /Medical paid directly to provider/);
   assert.equal(csv.data.trim().split("\r\n").length, 3);
+});
+
+
+test("biller directory: search, account formats, unlisted billers need a verified address", async () => {
+  const anon = client();
+  const hits = (await anon("GET", "/billers?q=duke")).data;
+  assert.equal(hits[0].id, "duke-energy");
+  assert.equal(hits[0].lane, "billpay_network");
+  assert.ok(hits[0].accountHint);
+
+  const member = await signup("member");
+  const bad = await member("POST", "/bills", billBody({ billerId: "duke-energy", category: "utilities", accountNumber: "12345" }));
+  assert.equal(bad.status, 400);
+  assert.match(bad.data.error, /Duke Energy account number \(12 digits\)/);
+  assert.equal((await member("POST", "/bills", billBody({ billerId: "no-such-biller" }))).status, 400);
+
+  // Unlisted biller: accepted for review, but can't be approved until mapped or given a verified address.
+  const { data: odd } = await member("POST", "/bills", billBody({ billerId: "other", billerName: "Riverside Pediatrics", accountNumber: "RP 5521 993" }));
+  assert.equal(odd.billerId, null);
+  const admin = client();
+  await admin("POST", "/auth/login", { email: "admin@test.dev", password: "correct horse battery" });
+  const item = (await admin("GET", "/admin/queue")).data.find((b) => b.id === odd.id);
+  assert.ok(item.signals.some((x) => /isn't in the directory/.test(x)));
+  assert.equal((await admin("POST", `/admin/bills/${odd.id}/review`, { decision: "approve" })).status, 400);
+  assert.equal((await admin("POST", `/admin/bills/${odd.id}/review`, { decision: "approve", remit: { name: "Riverside Pediatrics", line1: "1 Main St", city: "Austin", state: "TX", zip: "123" } })).status, 400, "bad zip");
+  const ok = await admin("POST", `/admin/bills/${odd.id}/review`, { decision: "approve", remit: { name: "Riverside Pediatrics", line1: "1 Main St", city: "Austin", state: "tx", zip: "78701" } });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.data.billerInfo.lane, "check");
+  assert.equal(ok.data.billerInfo.remit.state, "TX");
+  assert.equal(ok.data.biller, "Riverside Pediatrics");
+});
+
+test("payouts: routed by lane, held, sent, confirmed — with failures retried by check or refunded", async () => {
+  const admin = client();
+  await admin("POST", "/auth/login", { email: "admin@test.dev", password: "correct horse battery" });
+  const member = await signup("member", "Rae");
+  const mk = async (over) => {
+    const { data } = await member("POST", "/bills", billBody(over));
+    await admin("POST", `/admin/bills/${data.id}/review`, { decision: "approve" });
+    return data;
+  };
+  const util = await mk({ billerId: "duke-energy", category: "utilities", accountNumber: "1234 5678 9012", amount: "100" });
+  const hosp = await mk({ billerId: "st-marys", amount: "100" });
+  const patron = await signup("patron");
+  await patron("POST", `/bills/${util.id}/pay`, { payInFull: true });
+  await patron("POST", `/bills/${hosp.id}/pay`, { payInFull: true });
+
+  // Hold is 0 days in tests, so listing processes them: network → sent, virtual card → needs a person.
+  let pu = (await admin("GET", "/admin/payouts")).data.find((p) => p.billId === util.id);
+  assert.equal(pu.lane, "billpay_network");
+  assert.equal(pu.status, "sent");
+  assert.match(pu.reference, /^RPPS trace \d{15}$/);
+  let ph = (await admin("GET", "/admin/payouts")).data.find((p) => p.billId === hosp.id);
+  assert.equal(ph.status, "needs_agent");
+  assert.equal(ph.card.limitCents, 10000);
+
+  // Network payments confirm on the next processing run.
+  await admin("POST", "/admin/payouts/process", {});
+  pu = (await admin("GET", "/admin/payouts")).data.find((p) => p.billId === util.id);
+  assert.equal(pu.status, "confirmed");
+  const pub = (await client()("GET", `/bills/${util.id}`)).data;
+  assert.equal(pub.payment.state, "confirmed");
+
+  // Virtual card: a person pays on the portal and records the confirmation.
+  assert.equal((await admin("POST", `/admin/payouts/${ph.id}/agent-paid`, {})).status, 400);
+  const paid = await admin("POST", `/admin/payouts/${ph.id}/agent-paid`, { confirmation: "SMH-88213" });
+  assert.equal(paid.data.status, "confirmed");
+  assert.equal(paid.data.card, null, "card details dropped once used");
+
+  // Patron sees proof on their giving history; nobody outside admin sees the card.
+  const giving = (await patron("GET", "/my/giving")).data;
+  assert.ok(giving.every((g) => g.payout.status === "confirmed"));
+  assert.equal(JSON.stringify(giving).includes("limitCents"), false);
+
+  // Failure path: a check that bounces, retried; then a refund that reopens the bill.
+  const shop = await mk({ billerId: "mikes-auto", category: "car", amount: "300" });
+  await patron("POST", `/bills/${shop.id}/pay`, { amount: 100 });
+  let pc = (await admin("GET", "/admin/payouts")).data.find((p) => p.billId === shop.id);
+  assert.equal(pc.lane, "check");
+  assert.equal(pc.status, "sent");
+  assert.match(pc.detail, /Mike's Auto Repair, 88 Fairview Ave/);
+  await admin("POST", "/admin/payouts/process", {});
+  pc = (await admin("GET", "/admin/payouts")).data.find((p) => p.billId === shop.id);
+  assert.equal(pc.status, "sent", "checks are not auto-confirmed");
+  assert.equal((await admin("POST", `/admin/payouts/${pc.id}/fail`, { reason: "Check returned: address closed" })).data.status, "failed");
+  assert.equal((await admin("POST", `/admin/payouts/${pc.id}/retry-check`, {})).data.status, "sent");
+  // Member confirms their biller got it.
+  const conf = await member("POST", `/my/bills/${shop.id}/confirm-received`, {});
+  assert.equal(conf.data.payouts[0].status, "confirmed");
+
+  await patron("POST", `/bills/${shop.id}/pay`, { amount: 50 });
+  const p2 = (await admin("GET", "/admin/payouts")).data.find((p) => p.billId === shop.id && p.status === "sent");
+  await admin("POST", `/admin/payouts/${p2.id}/fail`, { reason: "Biller refused payment" });
+  assert.equal((await admin("POST", `/admin/payouts/${p2.id}/refund`, {})).data.status, "refunded");
+  const after = (await client()("GET", `/bills/${shop.id}`)).data;
+  assert.equal(after.paidCents, 10000, "refunded gift no longer counts toward the bill");
+  const mine = (await patron("GET", "/my/giving")).data.find((g) => g.refunded);
+  assert.equal(mine.payout.status, "refunded");
+});
+
+test("account numbers are encrypted at rest", async () => {
+  const member = await signup("member");
+  await member("POST", "/bills", billBody({ billerId: "chase-card", category: "credit-card", accountNumber: "4111 1111 1111 1111" }));
+  const raw = fs.readFileSync(path.join(process.env.DATA_DIR, "db.json"), "utf8");
+  assert.equal(raw.includes("4111111111111111"), false);
+  const mine = (await member("GET", "/my/bills")).data[0];
+  assert.equal(mine.accountLast4, "1111");
+  assert.equal(mine.laneName, "Debt payment API");
+});
+
+test("stats still add up after refunds", async () => {
+  const s = (await client()("GET", "/stats")).data;
+  assert.ok(s.totalPaidCents > 0);
+  assert.ok(Array.isArray(s.leaderboard));
 });

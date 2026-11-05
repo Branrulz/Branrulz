@@ -260,6 +260,42 @@ label.check input { width: 16px; height: 16px; accent-color: var(--gold); }
 .payout-mark .btn { padding: 8px 10px; font-size: .6rem; white-space: nowrap; }
 .payouts .tax-table { display: block; overflow-x: auto; }
 
+/* ---------- billers & payouts ---------- */
+.biller-pick { position: relative; display: grid; gap: 10px; }
+.biller-results { position: absolute; left: 0; right: 0; top: 66px; z-index: 20; list-style: none; margin: 0; padding: 4px; max-height: 280px; overflow-y: auto;
+  background: var(--surface-2); border: 1px solid var(--hairline-strong); border-radius: var(--radius); box-shadow: 0 18px 40px rgba(0,0,0,.6); }
+.biller-results li { display: grid; padding: 9px 10px; border-radius: 3px; cursor: pointer; }
+.biller-results li span { font-size: .75rem; color: var(--muted); }
+.biller-results li.active, .biller-results li:hover { background: rgba(201,169,97,.12); }
+.biller-results li[data-i="other"] { border-top: 1px solid var(--hairline); margin-top: 4px; }
+.biller-chosen { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--gold); border-radius: var(--radius); background: rgba(201,169,97,.06); }
+.biller-chosen strong { display: block; font-weight: 500; }
+.pay-proof { margin: 12px 0 0; font-size: .78rem; color: var(--muted); }
+.pay-proof.confirmed { color: #9fc79a; }
+.po { display: inline-block; font-size: .75rem; color: var(--muted); }
+.po-confirmed { color: #9fc79a; }
+.po-failed { color: var(--danger); }
+.po-refunded { color: var(--gold); }
+.po-sent, .po-needs_agent { color: var(--gold-light); }
+.member-payouts { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--hairline); }
+.member-payouts ul { list-style: none; margin: 6px 0 0; padding: 0; font-size: .85rem; }
+.member-payouts li { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; padding: 3px 0; }
+.member-payouts small { color: var(--muted); }
+.history .po { display: block; margin-top: 2px; }
+.map-biller { border: 1px solid var(--hairline-strong); border-radius: var(--radius); padding: 14px; display: grid; gap: 10px; margin: 0; }
+.map-biller legend { padding: 0 6px; }
+.row3 { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; }
+@media (max-width: 480px) { .row3 { grid-template-columns: 1fr; } }
+.lane-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: .78rem; color: var(--muted); margin: 6px 0 8px; }
+.lane-legend strong { color: var(--gold-light); font-weight: 500; }
+.payout-table td { vertical-align: top; }
+.payout-table tr.needs td { background: rgba(201,169,97,.05); }
+.payout-mark { flex-wrap: wrap; margin-top: 4px; }
+.payout-mark .w-city { max-width: 110px; } .payout-mark .w-st { max-width: 52px; } .payout-mark .w-zip { max-width: 80px; }
+.agent-task p { margin: 0 0 6px; font-size: .82rem; }
+.vcard { color: var(--gold-light); }
+.agent-task code { color: var(--gold-light); }
+
 /* ---------- paperwork ---------- */
 .tax-note { margin: 0; padding: 12px 14px; border: 1px solid var(--hairline); border-radius: var(--radius); font-size: .82rem; color: #d8d0bd; line-height: 1.55; }
 .tax-note strong { color: var(--gold-light); font-weight: 500; }

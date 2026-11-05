@@ -85,6 +85,16 @@ function renderNav() {
 
 // ---------- feed ----------
 
+// Proof that money reached the biller, shown on bills patrons have paid toward.
+function paymentBadge(b) {
+  if (!b.payment) return "";
+  if (b.payment.state === "confirmed") return `<p class="pay-proof confirmed">✓ ${esc(b.biller)} confirmed payment${b.paidOff ? "" : ` of ${money(b.payment.confirmedCents)}`}</p>`;
+  return `<p class="pay-proof">Payment on its way to ${esc(b.biller)}${b.payment.confirmedCents ? ` · ${money(b.payment.confirmedCents)} confirmed` : ""}</p>`;
+}
+
+const PAYOUT_ICON = { confirmed: "✓", refunded: "↺", failed: "!", held: "◷", sent: "→", needs_agent: "→" };
+const payoutLine = (po) => po ? `<span class="po po-${esc(po.status)}">${PAYOUT_ICON[po.status] || ""} ${esc(po.statusText)}${po.status === "held" && po.releaseAt ? ` until ${new Date(po.releaseAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : ""}</span>` : "";
+
 function billCard(b) {
   const pct = Math.min(100, Math.round((b.paidCents / b.amountCents) * 100));
   const latest = b.contributions.slice(-2).reverse();
@@ -109,6 +119,7 @@ function billCard(b) {
         <span><strong>${money(b.paidCents)}</strong> of ${money(b.amountCents)}</span>
         <span>${b.paidOff ? "Settled in full" : money(b.remainingCents) + " outstanding"}</span>
       </div>
+      ${paymentBadge(b)}
       ${latest.length ? `<ul class="contribs">${latest.map((c) => `<li><strong>${esc(c.patron)}</strong> ${tierChip(c.tier)} gave ${money(c.amountCents)}${c.message ? ` — <q>${esc(c.message)}</q>` : ""}</li>`).join("")}</ul>` : ""}
       ${action}
       ${canReport ? `<button class="report-link" data-report="${esc(b.id)}">Report</button>` : ""}
@@ -186,7 +197,8 @@ async function renderPatronLedger(el) {
         <h2>Accounts you've settled</h2>
         ${giving.length ? `<ul class="history">${giving.map((g) => `
           <li><div><strong>${esc(g.billTitle)}</strong>
-            <span class="muted-line">${ago(g.createdAt)} · paid to ${esc(g.payee)}${g.anonymous ? " · anonymous" : ""}${g.billPaidOff ? " · settled" : ""} · <a href="#/receipt/${esc(g.id)}">Receipt</a></span></div>
+            <span class="muted-line">${ago(g.createdAt)} · paid to ${esc(g.payee)}${g.anonymous ? " · anonymous" : ""} · <a href="#/receipt/${esc(g.id)}">Receipt</a></span>
+            ${payoutLine(g.payout)}</div>
             <span class="history-amt">${money(g.amountCents)}</span></li>`).join("")}</ul>`
         : `<p class="empty-small">Nothing yet. <a href="#/deck">Open the Deck</a> to make your first gesture.</p>`}
       </section>
@@ -221,15 +233,20 @@ async function renderMemberLedger(el) {
       </ul>
     </div>
     <div class="feed">${bills.length ? bills.map((b) => {
-      const [name, desc] = b.paidOff ? ["Settled", "Paid in full to your biller."] : STATUS[b.status];
+      const [name, desc] = b.paidOff
+        ? ["Settled", b.payment?.state === "confirmed" ? "Paid in full — your biller confirmed it." : "Fully funded by patrons. The payment is on its way to your biller."]
+        : STATUS[b.status];
       const pct = Math.min(100, Math.round((b.paidCents / b.amountCents) * 100));
       return `<article class="bill">
         <div class="bill-head"><span class="cat">${esc(label(b.category))}</span><span class="status status-${b.paidOff ? "settled" : b.status}">${name}</span></div>
         <h3>${esc(b.title)}</h3>
-        <p class="who">Submitted ${ago(b.createdAt)} · ${esc(b.biller)} ·· ${esc(b.accountLast4)}</p>
+        <p class="who">Submitted ${ago(b.createdAt)} · ${esc(b.biller)} · account …${esc(b.accountLast4)}</p>
         <p class="story">${esc(b.status === "rejected" ? "Reviewer's note: " + (b.reviewNote || "—") : desc)}</p>
         <div class="progress"><span style="width:${pct}%"></span></div>
         <div class="amounts"><span><strong>${money(b.paidCents)}</strong> of ${money(b.amountCents)}</span><span>${b.contributions.length} patron${b.contributions.length === 1 ? "" : "s"}</span></div>
+        ${b.payouts.length ? `<div class="member-payouts"><span class="mc-label">How it reaches ${esc(b.biller)} · ${esc(b.laneName)}</span>
+          <ul>${b.payouts.map((po) => `<li><span>${money(po.amountCents)}</span>${payoutLine(po)}${po.reference ? `<small>${esc(po.reference)}</small>` : ""}</li>`).join("")}</ul>
+          ${b.payouts.some((po) => po.status === "sent") ? `<button class="btn btn-ghost btn-block" data-action="confirm-received" data-bill="${esc(b.id)}">My biller received it</button>` : ""}</div>` : ""}
       </article>`;
     }).join("") : `<p class="empty">You haven't submitted a bill yet.</p>`}</div>`;
 }
@@ -246,13 +263,22 @@ async function renderReview(el) {
         <h3>${esc(b.title)} — ${money(b.amountCents)}</h3>
         <p class="story">${esc(b.story)}</p>
         <dl class="facts">
-          <dt>Biller</dt><dd>${esc(b.biller)} · account …${esc(b.accountLast4)}</dd>
+          <dt>Biller</dt><dd>${esc(b.biller)} · account …${esc(b.accountLast4)}
+            ${b.billerInfo ? `<br><small class="muted-line">${esc(b.billerInfo.laneName)}${b.billerInfo.remit ? ` · ${esc(remitText(b.billerInfo.remit))}` : ""}</small>` : ""}</dd>
           <dt>Member</dt><dd>${esc(b.owner?.displayName)} · ${esc(b.owner?.email)} · joined ${ago(b.owner?.createdAt)} · ${b.owner?.otherBills} other bill(s), ${b.owner?.rejectedBills} rejected</dd>
           <dt>Statement</dt><dd>${b.hasDocument ? `<a href="/api/admin/bills/${esc(b.id)}/document" target="_blank" rel="noopener">${esc(b.documentName)}</a>` : "None"}</dd>
           ${b.dueDate ? `<dt>Due</dt><dd>${esc(b.dueDate)}</dd>` : ""}
         </dl>
         ${b.signals.length ? `<ul class="signals">${b.signals.map((s) => `<li>${esc(s)}</li>`).join("")}</ul>` : ""}
         ${b.reports.length ? `<div class="reports"><span class="eyebrow">Reports (${b.reports.length})</span><ul>${b.reports.map((r) => `<li><strong>${esc(r.reason)}</strong>${r.details ? " — " + esc(r.details) : ""}</li>`).join("")}</ul></div>` : ""}
+        ${b.billerInfo ? "" : `<fieldset class="map-biller">
+          <legend class="eyebrow">Before approving: how will we pay this biller?</legend>
+          <label>Match to a directory biller
+            <select name="mapBiller"><option value="">— Not in the directory —</option>${(b.directory || []).map((d) => `<option value="${esc(d.id)}">${esc(d.name)}</option>`).join("")}</select></label>
+          <p class="muted-line">…or enter a payment address <strong>you've verified yourself</strong> (from the biller's official website or a phone call to a number you looked up — never from the statement). They'll be paid by mailed check.</p>
+          <div class="row"><label>Payee name<input name="remitName" value="${esc(b.biller)}"></label><label>Street or PO box<input name="remitLine1"></label></div>
+          <div class="row3"><label>City<input name="remitCity"></label><label>State<input name="remitState" maxlength="2"></label><label>ZIP<input name="remitZip" maxlength="10"></label></div>
+        </fieldset>`}
         <label>Note to member <small>(required to reject)</small><input name="note" maxlength="500"></label>
         <p class="error" hidden></p>
         <div class="actions">
@@ -264,20 +290,64 @@ async function renderReview(el) {
     ${payoutsSection(payouts)}`;
 }
 
+const remitText = (r) => `${r.name}, ${r.line1}, ${r.city}, ${r.state} ${r.zip}`;
+const LANE_SHORT = { debt_api: "Debt API", billpay_network: "Bill-pay network", virtual_card: "Virtual card", check: "Check" };
+
+function payoutActions(p) {
+  const err = `<p class="error" hidden></p>`;
+  switch (p.status) {
+    case "needs_agent":
+      return `<div class="agent-task">
+        <p><strong>Pay on ${esc(p.biller)}'s official guest-pay page</strong> — find it yourself on their website, never from a link in the statement.
+        Account <code>…${esc(p.accountLast4)}</code> · amount <strong>${money(p.amountCents)}</strong>.</p>
+        ${p.card ? `<p class="vcard">Single-use card •••• ${esc(p.card.last4)} · exp ${esc(p.card.expires)} · limit ${money(p.card.limitCents)} <small>(full number revealed in the card provider's dashboard)</small></p>` : ""}
+        <div class="payout-mark"><input name="confirmation" placeholder="Confirmation no. from the biller" maxlength="80">
+          <button class="btn btn-primary" data-payout-action="agent-paid">Paid</button>
+          <button class="btn btn-danger" data-payout-action="fail">Couldn't pay</button></div>${err}</div>`;
+    case "sent":
+      return p.autoConfirm ? `<span class="muted-line">Waiting for ${esc(p.provider)} to confirm</span>`
+        : `<div class="payout-mark"><input name="note" placeholder="e.g. Check cleared 11/14" maxlength="120">
+            <button class="btn btn-ghost" data-payout-action="confirm">Confirm</button>
+            <button class="btn btn-danger" data-payout-action="fail">Failed</button></div>${err}`;
+    case "held":
+      return `<span class="muted-line">Releases ${new Date(p.releaseAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
+        <div class="payout-mark"><button class="btn btn-ghost" data-payout-action="release">Release now</button>
+        <button class="btn btn-danger" data-payout-action="refund">Refund patron</button></div>${err}`;
+    case "failed":
+      return `<div class="payout-mark">
+        ${p.remit ? "" : `<input name="remitLine1" placeholder="Verified street / PO box"><input name="remitCity" placeholder="City" class="w-city"><input name="remitState" placeholder="ST" maxlength="2" class="w-st"><input name="remitZip" placeholder="ZIP" maxlength="10" class="w-zip">`}
+        <button class="btn btn-ghost" data-payout-action="retry-check">Retry by check</button>
+        <button class="btn btn-danger" data-payout-action="refund">Refund patron</button></div>${err}`;
+    case "confirmed":
+      return `<span class="muted-line">${esc(p.proof?.detail || "Confirmed")}</span>`;
+    default:
+      return `<span class="muted-line">${esc(p.events.at(-1)?.note || "")}</span>`;
+  }
+}
+
 function payoutsSection(payouts) {
-  const queued = payouts.filter((p) => p.status === "queued");
-  const total = queued.reduce((s, p) => s + p.amountCents, 0);
+  const action = payouts.filter((p) => p.needsAction);
+  const count = (st) => payouts.filter((p) => p.status === st).length;
+  const owed = payouts.filter((p) => ["held", "sent", "needs_agent", "failed"].includes(p.status)).reduce((s, p) => s + p.amountCents, 0);
   return `
     <section class="card payouts">
-      <span class="eyebrow">Money owed to billers</span>
-      <h2>Payouts <span class="count">${queued.length}</span></h2>
-      <p class="notice">Pay each biller directly (bill-pay, or a check to the biller's official remit address — never an address from the member), then record the check number or confirmation. ${queued.length ? `Outstanding: <strong>${money(total)}</strong>.` : ""}</p>
-      ${payouts.length ? `<table class="tax-table">
-        <thead><tr><th>Biller</th><th>Account</th><th>For</th><th>Amount</th><th>Status</th></tr></thead>
-        <tbody>${payouts.map((p) => `<tr data-payout="${esc(p.id)}">
-          <td>${esc(p.biller)}</td><td>…${esc(p.accountLast4)}</td><td>${esc(p.billTitle)}</td><td>${money(p.amountCents)}</td>
-          <td>${p.status === "sent" ? `<span class="status status-verified">Sent · ${esc(p.reference)}</span>`
-            : `<div class="payout-mark"><input name="reference" placeholder="Check no. / confirmation" maxlength="80"><button class="btn btn-ghost" data-action="payout-sent">Mark sent</button></div><p class="error" hidden></p>`}</td></tr>`).join("")}</tbody>
+      <div class="tax-head">
+        <div><span class="eyebrow">Money owed to billers</span><h2>Payouts ${action.length ? `<span class="count">${action.length} need you</span>` : ""}</h2></div>
+        <button class="btn btn-ghost" data-action="process-payouts">Process now</button>
+      </div>
+      <div class="lane-legend">
+        <span><strong>Debt API</strong> credit cards, loans</span><span><strong>Bill-pay network</strong> utilities, telecom</span>
+        <span><strong>Virtual card</strong> guest-pay portals</span><span><strong>Check</strong> everything else</span>
+      </div>
+      <p class="muted-line">${money(owed)} in flight · ${count("held")} on hold · ${count("sent")} sent · ${count("confirmed")} confirmed · ${count("failed")} failed</p>
+      ${payouts.length ? `<table class="tax-table payout-table">
+        <thead><tr><th>Biller</th><th>Lane</th><th>For</th><th>Amount</th><th>Status</th><th>Action</th></tr></thead>
+        <tbody>${payouts.map((p) => `<tr data-payout="${esc(p.id)}" class="${p.needsAction ? "needs" : ""}">
+          <td>${esc(p.biller)}<br><small class="muted-line">…${esc(p.accountLast4)}${p.reference ? " · " + esc(p.reference) : ""}</small></td>
+          <td>${esc(LANE_SHORT[p.lane] || p.lane)}<br><small class="muted-line">${esc(p.provider)}</small></td>
+          <td>${esc(p.billTitle)}</td><td>${money(p.amountCents)}</td>
+          <td><span class="po po-${esc(p.status)}">${esc(p.status.replace("_", " "))}</span></td>
+          <td>${payoutActions(p)}</td></tr>`).join("")}</tbody>
       </table>` : `<p class="empty-small">No payouts yet.</p>`}
     </section>`;
 }
@@ -358,7 +428,7 @@ authForm.addEventListener("submit", async (e) => {
 // ---------- global clicks ----------
 
 document.addEventListener("click", async (e) => {
-  const t = e.target.closest("[data-auth],[data-action],[data-close],[data-pay],[data-report],[data-decision],[data-swipe]");
+  const t = e.target.closest("[data-auth],[data-action],[data-close],[data-pay],[data-report],[data-decision],[data-swipe],[data-payout-action]");
   if (!t) return;
 
   if (t.dataset.auth) return openAuth(t.dataset.auth, t.dataset.role);
@@ -374,13 +444,34 @@ document.addEventListener("click", async (e) => {
   }
   if (t.dataset.action === "submit-bill") return openPost();
   if (t.dataset.action === "print") return window.print();
-  if (t.dataset.action === "payout-sent") {
+  if (t.dataset.action === "change-biller") { resetBillerPicker(); return billerSearch.focus(); }
+  if (t.dataset.action === "process-payouts") {
+    await api("/admin/payouts/process", { method: "POST", body: {} }).catch(() => {});
+    return renderReview($("#view-review"));
+  }
+  if (t.dataset.payoutAction) {
     const row = t.closest("[data-payout]");
+    const act = t.dataset.payoutAction;
+    const val = (n) => $(`input[name=${n}]`, row)?.value || "";
+    const body = { confirmation: val("confirmation"), note: val("note") };
+    if (act === "fail") body.reason = prompt("What went wrong?") || "";
+    if (act === "refund" && !confirm("Refund this patron? The bill reopens for this amount.")) return;
+    if (act === "retry-check" && val("remitLine1")) {
+      const name = row.querySelector("td").firstChild.textContent.trim();
+      body.remit = { name, line1: val("remitLine1"), city: val("remitCity"), state: val("remitState"), zip: val("remitZip") };
+    }
     try {
-      await api(`/admin/payouts/${row.dataset.payout}/sent`, { method: "POST", body: { reference: $("input[name=reference]", row).value } });
-      toast("Payout recorded.");
+      await api(`/admin/payouts/${row.dataset.payout}/${act}`, { method: "POST", body });
+      toast({ "agent-paid": "Recorded. Biller payment confirmed.", confirm: "Payment confirmed.", fail: "Marked as failed.", "retry-check": "Check sent.", refund: "Patron refunded.", release: "Released and sent." }[act]);
       return renderReview($("#view-review"));
     } catch (err) { return showError(row, err.message); }
+  }
+  if (t.dataset.action === "confirm-received") {
+    try {
+      await api(`/my/bills/${t.dataset.bill}/confirm-received`, { method: "POST", body: {} });
+      toast("Thank you — marked as received.");
+      return route();
+    } catch (err) { return toast(err.message); }
   }
   if (t.dataset.swipe) return swipe(t.dataset.swipe);
   if (t.dataset.action === "reset-deck") {
@@ -396,11 +487,84 @@ document.addEventListener("click", async (e) => {
 
 const postForm = $("#post-form");
 
+// ---------- biller picker ----------
+
+const billerSearch = $("#biller-search");
+const billerResults = $("#biller-results");
+let billerTimer = null, billerItems = [], billerActive = -1;
+
+function chooseBiller(b) {
+  postForm.billerId.value = b ? b.id : "other";
+  billerResults.hidden = true;
+  billerSearch.setAttribute("aria-expanded", "false");
+  $("#biller-name-wrap").hidden = Boolean(b);
+  billerSearch.closest("label").hidden = true;
+  $("#biller-chosen").hidden = false;
+  $("#biller-chosen").innerHTML = b
+    ? `<div><strong>${esc(b.name)}</strong><span class="muted-line">${esc(b.laneName)} — ${esc(b.how)}</span></div><button type="button" class="btn btn-link" data-action="change-biller">Change</button>`
+    : `<div><strong>Not listed</strong><span class="muted-line">A reviewer will verify a payment address before your bill goes live.</span></div><button type="button" class="btn btn-link" data-action="change-biller">Change</button>`;
+  if (b) {
+    postForm.billerName.value = "";
+    postForm.category.value = b.category;
+    postForm.accountNumber.placeholder = b.accountHint;
+    $("#account-hint").textContent = `(${b.accountHint}, exactly as on your statement — encrypted, never shown to patrons)`;
+  } else {
+    postForm.billerName.value = billerSearch.value;
+    postForm.accountNumber.placeholder = "Account number";
+    $("#account-hint").textContent = "(exactly as on your statement — encrypted, never shown to patrons)";
+    postForm.billerName.focus();
+  }
+}
+
+function resetBillerPicker() {
+  postForm.billerId.value = "";
+  billerSearch.value = "";
+  billerSearch.closest("label").hidden = false;
+  $("#biller-chosen").hidden = true;
+  $("#biller-name-wrap").hidden = true;
+  billerResults.hidden = true;
+  $("#account-hint").textContent = "(exactly as on your statement — encrypted, never shown to patrons)";
+}
+
+function renderBillerResults() {
+  billerResults.innerHTML = billerItems.map((b, i) => `<li role="option" data-i="${i}" class="${i === billerActive ? "active" : ""}">
+      <strong>${esc(b.name)}</strong><span>${esc(label(b.category))} · ${esc(b.laneName)}</span></li>`).join("")
+    + `<li role="option" data-i="other" class="${billerActive === billerItems.length ? "active" : ""}"><strong>Not listed — enter it myself</strong><span>A reviewer verifies how to pay them</span></li>`;
+  billerResults.hidden = false;
+  billerSearch.setAttribute("aria-expanded", "true");
+}
+
+billerSearch.addEventListener("input", () => {
+  clearTimeout(billerTimer);
+  billerTimer = setTimeout(async () => {
+    billerItems = await api("/billers?q=" + encodeURIComponent(billerSearch.value)).catch(() => []);
+    billerActive = billerItems.length ? 0 : -1;
+    renderBillerResults();
+  }, 120);
+});
+billerSearch.addEventListener("focus", () => billerSearch.dispatchEvent(new Event("input")));
+billerSearch.addEventListener("keydown", (e) => {
+  if (billerResults.hidden) return;
+  const max = billerItems.length; // last index = "Not listed"
+  if (e.key === "ArrowDown") { billerActive = Math.min(max, billerActive + 1); renderBillerResults(); e.preventDefault(); }
+  if (e.key === "ArrowUp") { billerActive = Math.max(0, billerActive - 1); renderBillerResults(); e.preventDefault(); }
+  if (e.key === "Enter") { e.preventDefault(); chooseBiller(billerActive < max ? billerItems[billerActive] : null); }
+  if (e.key === "Escape") billerResults.hidden = true;
+});
+billerResults.addEventListener("mousedown", (e) => {
+  const li = e.target.closest("li");
+  if (!li) return;
+  e.preventDefault();
+  chooseBiller(li.dataset.i === "other" ? null : billerItems[Number(li.dataset.i)]);
+});
+billerSearch.addEventListener("blur", () => setTimeout(() => (billerResults.hidden = true), 150));
+
 function openPost() {
   if (!state.me) return openAuth("join", "member");
   if (!isRole("member")) return;
   if (state.me.canSubmit === false) return toast(state.me.cantSubmitReason);
   postForm.reset();
+  resetBillerPicker();
   showError(postForm, "");
   $("#post-dialog").showModal();
 }
@@ -418,6 +582,7 @@ postForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = postForm;
   const file = f.document.files[0];
+  if (!f.billerId.value) return showError(f, "Choose who the bill is owed to");
   if (!file) return showError(f, "Please attach your statement or invoice");
   if (file.size > 4 * 1024 * 1024) return showError(f, "Statement must be 4 MB or smaller");
   if (!f.attest.checked) return showError(f, "Please confirm the bill is real and yours");
@@ -426,7 +591,7 @@ postForm.addEventListener("submit", async (e) => {
   try {
     const body = {
       title: f.title.value, story: f.story.value, amount: f.amount.value, category: f.category.value,
-      biller: f.biller.value, accountLast4: f.accountLast4.value, city: f.city.value, dueDate: f.dueDate.value,
+      billerId: f.billerId.value || "other", billerName: f.billerName.value, accountNumber: f.accountNumber.value, city: f.city.value, dueDate: f.dueDate.value,
       attest: true, document: { name: file.name, data: await readFileBase64(file) },
     };
     await api("/bills", { method: "POST", body });
@@ -771,6 +936,7 @@ async function renderReceipt(id) {
       <dt>Amount</dt><dd class="paper-amt">${money(r.amountCents)}</dd>
       ${r.feeCents ? `<dt>Card processing</dt><dd>${money(r.feeCents)} — paid by you so the biller received the full amount; not part of the gift</dd>` : ""}
     </dl>
+    ${r.payout ? `<p class="paper-note"><strong>Payment to biller:</strong> ${esc(r.payout.statusText)} · ${esc(r.payout.laneName)} (${esc(r.payout.provider)})${r.payout.reference ? ` · ref ${esc(r.payout.reference)}` : ""}${r.payout.confirmedAt ? ` · confirmed ${new Date(r.payout.confirmedAt).toLocaleDateString("en-US")}` : ""}</p>` : ""}
     <p class="paper-note"><strong>Gift-tax treatment:</strong> ${TREATMENT[r.treatment]}${r.treatment === "medical" ? " If insurance later reimburses this expense, the reimbursed portion does not qualify." : ""}</p>`);
 }
 
@@ -825,7 +991,16 @@ async function decide(btn) {
   const decision = btn.dataset.decision;
   if (decision === "ban" && !confirm("Reject this bill and suspend the member's account? Their other open bills will be pulled too.")) return;
   try {
-    await api(`/admin/bills/${item.dataset.id}/review`, { method: "POST", body: { decision, note: $("input[name=note]", item).value } });
+    const body = { decision, note: $("input[name=note]", item).value };
+    const map = $("select[name=mapBiller]", item);
+    if (decision === "approve" && map) {
+      if (map.value) body.billerId = map.value;
+      else if ($("input[name=remitLine1]", item).value) {
+        body.remit = { name: $("input[name=remitName]", item).value, line1: $("input[name=remitLine1]", item).value,
+          city: $("input[name=remitCity]", item).value, state: $("input[name=remitState]", item).value, zip: $("input[name=remitZip]", item).value };
+      }
+    }
+    await api(`/admin/bills/${item.dataset.id}/review`, { method: "POST", body });
     toast(decision === "approve" ? "Approved. The bill is now live." : decision === "ban" ? "Rejected and member suspended." : "Rejected.");
     renderReview($("#view-review"));
   } catch (err) { showError(item, err.message); }

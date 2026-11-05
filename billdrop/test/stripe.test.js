@@ -145,17 +145,20 @@ test("webhook: signature is enforced, and a succeeded event records the gift wit
   assert.equal(giving[0].amountCents, 1000);
 });
 
-test("payouts: each gift queues a payout to the biller; reviewers record when it's sent", async () => {
+test("refunding a failed payout returns the full card charge through Stripe", async () => {
   const admin = await signup("patron", "admin@test.dev");
   const patron = await signup("patron");
   assert.equal((await patron("GET", "/admin/payouts")).status, 403);
-  const list = (await admin("GET", "/admin/payouts")).data;
-  assert.ok(list.length >= 3);
-  const q = list.find((p) => p.status === "queued");
-  assert.ok(q.biller && q.accountLast4 && q.amountCents > 0);
-  assert.equal((await admin("POST", `/admin/payouts/${q.id}/sent`, {})).status, 400, "reference required");
-  assert.equal((await admin("POST", `/admin/payouts/${q.id}/sent`, { reference: "Check #1042" })).status, 200);
-  assert.equal((await admin("POST", `/admin/payouts/${q.id}/sent`, { reference: "Check #1042" })).status, 409);
+  const bill = await openBill(patron);
+  const intent = (await patron("POST", `/bills/${bill.id}/payment-intent`, { amount: "20" })).data;
+  succeed(intent.paymentIntentId);
+  const done = (await patron("POST", `/payments/${intent.paymentIntentId}/confirm`, {})).data;
+  const payout = (await admin("GET", "/admin/payouts")).data.find((p) => p.contributionId === done.receipt.id);
+  assert.equal(payout.status, "held", "7-day hold by default");
+  assert.equal((await admin("POST", `/admin/payouts/${payout.id}/refund`, {})).status, 200);
+  assert.equal(refunds.at(-1).payment_intent, intent.paymentIntentId);
+  assert.equal(refunds.at(-1).amount, intent.chargeCents, "amount + fee back to the patron");
+  assert.equal((await patron("GET", "/my/giving")).data.find((g) => g.id === done.receipt.id).refunded, true);
 });
 
 test("refuses to start with a live Stripe key", () => {

@@ -158,10 +158,20 @@
         <label>Amount owed ($)<input name="amount" type="number" min="1" step="0.01" required placeholder="850.00"></label>
         <label>Category<select name="category" required></select></label>
       </div>
-      <div class="row">
-        <label>Owed to (biller)<input name="biller" required minlength="2" maxlength="80" placeholder="Duke Energy"></label>
-        <label>Account no. — last 4<input name="accountLast4" required inputmode="numeric" pattern="\d{4}" maxlength="4" placeholder="4821"></label>
+      <div class="biller-pick">
+        <label>Who is the bill owed to?
+          <input id="biller-search" autocomplete="off" placeholder="Start typing: Duke Energy, Nelnet, Chase…" role="combobox" aria-expanded="false" aria-controls="biller-results">
+        </label>
+        <ul class="biller-results" id="biller-results" role="listbox" hidden></ul>
+        <input type="hidden" name="billerId">
+        <div class="biller-chosen" id="biller-chosen" hidden></div>
+        <label id="biller-name-wrap" hidden>Biller name <small>(a reviewer will verify how to pay them before your bill goes live)</small>
+          <input name="billerName" maxlength="80" placeholder="Riverside Pediatrics">
+        </label>
       </div>
+      <label>Account number <small id="account-hint">(exactly as on your statement — encrypted, never shown to patrons)</small>
+        <input name="accountNumber" required maxlength="40" autocomplete="off" spellcheck="false" placeholder="Account number">
+      </label>
       <div class="row">
         <label>City or region <small>(optional)</small><input name="city" maxlength="60" placeholder="Tulsa, OK"></label>
         <label>Due date <small>(optional)</small><input name="dueDate" type="date"></label>
