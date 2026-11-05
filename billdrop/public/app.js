@@ -235,7 +235,7 @@ async function renderMemberLedger(el) {
 }
 
 async function renderReview(el) {
-  const queue = await api("/admin/queue");
+  const [queue, payouts] = await Promise.all([api("/admin/queue"), api("/admin/payouts")]);
   el.innerHTML = `
     <span class="eyebrow">Reviewer desk</span>
     <h1 class="page-title">Review queue <span class="count">${queue.length}</span></h1>
@@ -260,7 +260,26 @@ async function renderReview(el) {
           <button class="btn btn-ghost" data-decision="reject">Reject</button>
           <button class="btn btn-primary" data-decision="approve">Approve</button>
         </div>
-      </article>`).join("") : `<p class="empty">All caught up. Nothing awaits review.</p>`}</div>`;
+      </article>`).join("") : `<p class="empty">All caught up. Nothing awaits review.</p>`}</div>
+    ${payoutsSection(payouts)}`;
+}
+
+function payoutsSection(payouts) {
+  const queued = payouts.filter((p) => p.status === "queued");
+  const total = queued.reduce((s, p) => s + p.amountCents, 0);
+  return `
+    <section class="card payouts">
+      <span class="eyebrow">Money owed to billers</span>
+      <h2>Payouts <span class="count">${queued.length}</span></h2>
+      <p class="notice">Pay each biller directly (bill-pay, or a check to the biller's official remit address — never an address from the member), then record the check number or confirmation. ${queued.length ? `Outstanding: <strong>${money(total)}</strong>.` : ""}</p>
+      ${payouts.length ? `<table class="tax-table">
+        <thead><tr><th>Biller</th><th>Account</th><th>For</th><th>Amount</th><th>Status</th></tr></thead>
+        <tbody>${payouts.map((p) => `<tr data-payout="${esc(p.id)}">
+          <td>${esc(p.biller)}</td><td>…${esc(p.accountLast4)}</td><td>${esc(p.billTitle)}</td><td>${money(p.amountCents)}</td>
+          <td>${p.status === "sent" ? `<span class="status status-verified">Sent · ${esc(p.reference)}</span>`
+            : `<div class="payout-mark"><input name="reference" placeholder="Check no. / confirmation" maxlength="80"><button class="btn btn-ghost" data-action="payout-sent">Mark sent</button></div><p class="error" hidden></p>`}</td></tr>`).join("")}</tbody>
+      </table>` : `<p class="empty-small">No payouts yet.</p>`}
+    </section>`;
 }
 
 // ---------- routing ----------
@@ -355,6 +374,14 @@ document.addEventListener("click", async (e) => {
   }
   if (t.dataset.action === "submit-bill") return openPost();
   if (t.dataset.action === "print") return window.print();
+  if (t.dataset.action === "payout-sent") {
+    const row = t.closest("[data-payout]");
+    try {
+      await api(`/admin/payouts/${row.dataset.payout}/sent`, { method: "POST", body: { reference: $("input[name=reference]", row).value } });
+      toast("Payout recorded.");
+      return renderReview($("#view-review"));
+    } catch (err) { return showError(row, err.message); }
+  }
   if (t.dataset.swipe) return swipe(t.dataset.swipe);
   if (t.dataset.action === "reset-deck") {
     await api("/deck/reset", { method: "POST", body: {} });
@@ -429,6 +456,8 @@ function openPay(id) {
   payForm.amount.max = (bill.remainingCents / 100).toFixed(2);
   payForm.amount.value = (bill.remainingCents / 100).toFixed(2);
   payForm.amount.disabled = false;
+  resetCardStep();
+  updateFee();
   $("#pay-tax").hidden = true;
   state.taxPreview = null;
   api(`/bills/${bill.id}/tax-preview`).then((t) => { state.taxPreview = t; updateTaxNote(); }).catch(() => {});
@@ -441,22 +470,113 @@ payForm.payInFull.addEventListener("change", () => {
   if (payForm.payInFull.checked && bill) payForm.amount.value = (bill.remainingCents / 100).toFixed(2);
 });
 
-payForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const before = state.me?.tier?.id;
-  try {
-    const res = await api(`/bills/${payingId}/pay`, {
-      method: "POST",
-      body: { amount: payForm.amount.value, payInFull: payForm.payInFull.checked, anonymous: payForm.anonymous.checked, message: payForm.message.value },
-    });
-    $("#pay-dialog").close();
+// ---------- payments: simulated, or Stripe test mode ----------
+
+const isStripe = () => state.config?.payments?.mode === "stripe";
+const pay = { stripe: null, elements: null, intent: null, busy: false };
+
+function feeFor(amountCents) {
+  const f = state.config?.cardFee || { percent: 0.029, fixedCents: 30 };
+  return Math.ceil((amountCents + f.fixedCents) / (1 - f.percent)) - amountCents;
+}
+
+function updateFee() {
+  const el = $("#pay-fee");
+  if (!isStripe()) { el.hidden = true; $("#pay-submit").textContent = "Settle"; return; }
+  const amt = Math.round(Number(payForm.amount.value || 0) * 100) || 0;
+  const fee = amt ? feeFor(amt) : 0;
+  el.innerHTML = amt ? `Card total <strong>${money(amt + fee)}</strong> — includes ${money(fee)} card processing, so ${esc(findBill(payingId)?.biller || "the biller")} receives the full ${money(amt)}.` : "";
+  el.hidden = !amt;
+  if (!pay.intent) $("#pay-submit").textContent = "Continue to payment";
+}
+payForm.amount.addEventListener("input", updateFee);
+payForm.payInFull.addEventListener("change", updateFee);
+
+function resetCardStep() {
+  pay.intent = null; pay.elements = null;
+  $("#card-step").hidden = true;
+  $("#payment-element").innerHTML = "";
+  for (const el of [payForm.amount, payForm.payInFull, payForm.anonymous, payForm.message]) el.disabled = false;
+  if (payForm.payInFull.checked) payForm.amount.disabled = true;
+}
+
+let stripeJs = null;
+function loadStripe() {
+  if (window.Stripe) return Promise.resolve(window.Stripe);
+  // Stripe.js must be loaded from js.stripe.com (PCI requirement); it is never bundled or self-hosted.
+  stripeJs ||= new Promise((resolve, reject) => {
+    const tag = document.createElement("script");
+    tag.src = "https://js.stripe.com/v3/";
+    tag.onload = () => resolve(window.Stripe);
+    tag.onerror = () => { stripeJs = null; reject(new Error("Couldn't load the card form. Check your connection.")); };
+    document.head.appendChild(tag);
+  });
+  return stripeJs;
+}
+
+// Step 1 (Stripe): create the PaymentIntent for the chosen amount and show the card form.
+async function startCardStep(body) {
+  const StripeCtor = await loadStripe();
+  pay.stripe ||= StripeCtor(state.config.payments.publishableKey);
+  const intent = await api(`/bills/${payingId}/payment-intent`, { method: "POST", body });
+  pay.intent = intent;
+  pay.elements = pay.stripe.elements({
+    clientSecret: intent.clientSecret,
+    appearance: {
+      theme: "night",
+      variables: { colorPrimary: "#c9a961", colorBackground: "#1b1813", colorText: "#f1ead8", colorDanger: "#e07a6a", borderRadius: "4px", fontFamily: "Inter, system-ui, sans-serif" },
+    },
+    fonts: [{ cssSrc: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500&display=swap" }],
+  });
+  pay.elements.create("payment", { layout: "tabs" }).mount("#payment-element");
+  for (const el of [payForm.amount, payForm.payInFull, payForm.anonymous, payForm.message]) el.disabled = true;
+  $("#card-step").hidden = false;
+  $("#test-hint").hidden = !/^pk_test_/.test(state.config.payments.publishableKey);
+  $("#pay-submit").textContent = `Pay ${money(intent.chargeCents)}`;
+}
+
+// Step 2 (Stripe): confirm in the browser, then have the server verify with Stripe and record it.
+async function finishCardStep() {
+  const { error } = await pay.stripe.confirmPayment({
+    elements: pay.elements,
+    redirect: "if_required",
+    confirmParams: { return_url: location.origin + "/#/ledger" },
+  });
+  if (error) throw new Error(error.message || "Your card was declined.");
+  for (let i = 0; i < 5; i++) { // the webhook may still be catching up; retry briefly
+    try { return await api(`/payments/${pay.intent.paymentIntentId}/confirm`, { method: "POST", body: {} }); }
+    catch (err) { if (i === 4 || !/hasn't completed/.test(err.message)) throw err; await new Promise((r) => setTimeout(r, 800)); }
+  }
+}
+
+function afterPaid(res, beforeTier) {
+  $("#pay-dialog").close();
+  if (res.refunded) {
+    toast(`Another patron settled this first — your ${money(res.refundedCents)} has been refunded to your card.`);
+  } else {
     state.me = { ...state.me, givenCents: res.givenCents, tier: res.tier };
     renderNav();
-    if (res.tier.id !== before) toast(`You've risen to ${res.tier.name}. The Circle takes note.`);
-    else toast(`${res.bill.paidOff ? "Account settled. Most generous." : "Received with gratitude."} Receipt ${res.receipt.receiptNo} filed to your tax documents.`);
-    if (deckPending === payingId) { deckPending = null; state.deck.shift(); renderDeck(); }
-    else refreshFeed();
+    const refundNote = res.refundedCents ? ` ${money(res.refundedCents)} was more than remained and has been refunded.` : "";
+    if (res.tier.id !== beforeTier) toast(`You've risen to ${res.tier.name}. The Circle takes note.${refundNote}`);
+    else toast(`${res.bill.paidOff ? "Account settled. Most generous." : "Received with gratitude."} Receipt ${res.receipt.receiptNo} filed to your tax documents.${refundNote}`);
+  }
+  if (deckPending === payingId) { deckPending = null; state.deck.shift(); renderDeck(); }
+  else refreshFeed();
+}
+
+payForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (pay.busy) return;
+  const before = state.me?.tier?.id;
+  const body = { amount: payForm.amount.value, payInFull: payForm.payInFull.checked, anonymous: payForm.anonymous.checked, message: payForm.message.value };
+  const submit = $("#pay-submit");
+  pay.busy = true; submit.disabled = true; showError(payForm, "");
+  try {
+    if (!isStripe()) return afterPaid(await api(`/bills/${payingId}/pay`, { method: "POST", body }), before);
+    if (!pay.intent) return await startCardStep(body);
+    afterPaid(await finishCardStep(), before);
   } catch (err) { showError(payForm, err.message); }
+  finally { pay.busy = false; submit.disabled = false; }
 });
 
 // ---------- the deck (swipe to settle or pass) ----------
@@ -649,6 +769,7 @@ async function renderReceipt(id) {
       <dt>On behalf of</dt><dd>${esc(r.onBehalfOf)}</dd>
       <dt>For</dt><dd>${esc(r.billTitle)} (${esc(label(r.category))})</dd>
       <dt>Amount</dt><dd class="paper-amt">${money(r.amountCents)}</dd>
+      ${r.feeCents ? `<dt>Card processing</dt><dd>${money(r.feeCents)} — paid by you so the biller received the full amount; not part of the gift</dd>` : ""}
     </dl>
     <p class="paper-note"><strong>Gift-tax treatment:</strong> ${TREATMENT[r.treatment]}${r.treatment === "medical" ? " If insurance later reimburses this expense, the reimbursed portion does not qualify." : ""}</p>`);
 }
@@ -723,8 +844,9 @@ $("#filter-sort").addEventListener("change", (e) => { state.sort = e.target.valu
 // ---------- boot ----------
 
 (async () => {
-  const [cats, me] = await Promise.all([api("/categories"), api("/me").catch(() => null)]);
+  const [cats, me, config] = await Promise.all([api("/categories"), api("/me").catch(() => null), api("/config")]);
   state.me = me;
+  state.config = config;
   const opts = cats.map((c) => `<option value="${c}">${label(c)}</option>`).join("");
   $("#filter-category").insertAdjacentHTML("beforeend", opts);
   postForm.category.innerHTML = opts;

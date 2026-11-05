@@ -245,6 +245,21 @@ label.check input { width: 16px; height: 16px; accent-color: var(--gold); }
   .deck-btn { width: 60px; height: 60px; }
 }
 
+/* ---------- card payments ---------- */
+.pay-fee { margin: 0; font-size: .85rem; color: var(--muted); }
+.pay-fee strong { color: var(--gold-light); font-weight: 500; }
+.card-step { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--hairline-strong); border-radius: var(--radius); background: rgba(201,169,97,.04); }
+#payment-element { min-height: 40px; }
+.test-hint { margin: 0; font-size: .78rem; color: var(--muted); }
+.test-hint code { color: var(--gold-light); background: rgba(201,169,97,.1); padding: 1px 5px; border-radius: 3px; }
+#pay-dialog form { max-height: calc(100vh - 40px); overflow-y: auto; }
+
+.payouts { margin-top: 36px; }
+.payout-mark { display: flex; gap: 6px; }
+.payout-mark input { padding: 6px 8px; font-size: .82rem; min-width: 0; }
+.payout-mark .btn { padding: 8px 10px; font-size: .6rem; white-space: nowrap; }
+.payouts .tax-table { display: block; overflow-x: auto; }
+
 /* ---------- paperwork ---------- */
 .tax-note { margin: 0; padding: 12px 14px; border: 1px solid var(--hairline); border-radius: var(--radius); font-size: .82rem; color: #d8d0bd; line-height: 1.55; }
 .tax-note strong { color: var(--gold-light); font-weight: 500; }

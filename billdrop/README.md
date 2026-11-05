@@ -21,6 +21,38 @@ No dependencies, just Node 18+. Data lives in `billdrop/data/` (created and seed
 | `DATA_DIR` | Where `db.json` and uploaded statements live |
 | `COOKIE_SECURE=1` | Set when serving over HTTPS |
 | `AUTH_ATTEMPTS_PER_10_MIN` | Sign-up/login rate limit per IP (default 20) |
+| `STRIPE_SECRET_KEY` / `STRIPE_PUBLISHABLE_KEY` | Turns on card payments (test keys only) |
+| `STRIPE_WEBHOOK_SECRET` | Verifies Stripe webhooks |
+
+## Card payments (Stripe test mode)
+
+Without Stripe keys, "Settle" is simulated. With **test** keys, patrons pay by card through Stripe's embedded Payment Element, and no real money moves.
+
+1. Create a free account at [stripe.com](https://stripe.com), stay in **Test mode**, and open **Developers → API keys**.
+2. Start BillDrop with your test keys:
+
+   ```bash
+   STRIPE_SECRET_KEY=sk_test_... STRIPE_PUBLISHABLE_KEY=pk_test_... ADMIN_EMAILS=you@example.com npm start
+   ```
+
+3. Optional but recommended: forward webhooks with the [Stripe CLI](https://docs.stripe.com/stripe-cli), so payments are recorded even if the browser closes mid-payment:
+
+   ```bash
+   stripe listen --forward-to localhost:3000/api/stripe/webhook
+   ```
+
+   Copy the `whsec_...` it prints into `STRIPE_WEBHOOK_SECRET` and restart.
+4. Pay with test cards: `4242 4242 4242 4242` (success), `4000 0000 0000 0002` (declined), `4000 0025 0000 3155` (bank verification pop-up). Use any future date and any CVC.
+
+How a payment works:
+
+1. The patron picks an amount. The settle sheet shows the card total, which includes Stripe's 2.9% + $0.30 fee so the biller receives the full amount.
+2. **Continue to payment** creates a PaymentIntent on the server and shows the card form.
+3. **Pay** confirms the payment in the browser. The server then **fetches the PaymentIntent from Stripe itself**, checks it succeeded for the right amount, and records the gift exactly once. The webhook does the same if the browser never comes back.
+4. If another patron settled the bill first, the extra amount is **refunded automatically**.
+5. Each gift adds a **payout to the biller** on the reviewer desk. A reviewer pays the biller (bill-pay, or a check to the biller's official address) and records the check number or confirmation.
+
+Live keys are refused unless `ALLOW_LIVE_PAYMENTS=1`. Don't set that until the launch items in TRUST.md are done.
 
 ## Who does what
 
@@ -55,9 +87,9 @@ No dependencies, just Node 18+. Data lives in `billdrop/data/` (created and seed
 
 See **[TRUST.md](TRUST.md)** for the full fraud, identity-theft and tax write-up, including what's still needed before launch.
 
-## ⚠️ Prototype: payments are simulated
+## ⚠️ Prototype
 
-"Settle" records the payment, but no money moves. Before launch: real payments (e.g. Stripe), payouts to billers through bill-pay rails, ID verification for members and patrons, a real database, and a legal/CPA review. The details are in TRUST.md.
+Card payments run in Stripe **test mode** (or simulated without keys). Paying billers is a manual step that reviewers record. Before taking real money: automated biller payouts (bill-pay API), a licensed partner to hold funds, ID verification for members and patrons, a real database, and a legal/CPA review. The details are in TRUST.md.
 
 ## API (summary)
 
@@ -67,7 +99,11 @@ See **[TRUST.md](TRUST.md)** for the full fraud, identity-theft and tax write-up
 | GET | `/api/me` | anyone |
 | GET | `/api/bills?status=open\|paid\|all&category=&sort=` · `/api/deck` · `/api/stats` | anyone |
 | POST | `/api/bills` (with statement) · GET `/api/my/bills` | member |
-| POST | `/api/bills/:id/pay` · `/api/bills/:id/pass` · `/api/deck/reset` | patron |
+| GET | `/api/config` | anyone |
+| POST | `/api/bills/:id/payment-intent` · `/api/payments/:pi/confirm` (Stripe) or `/api/bills/:id/pay` (simulated) | patron |
+| POST | `/api/bills/:id/pass` · `/api/deck/reset` | patron |
+| POST | `/api/stripe/webhook` | Stripe (signed) |
+| GET | `/api/admin/payouts` · POST `/api/admin/payouts/:id/sent` | reviewer |
 | GET | `/api/bills/:id/tax-preview` · `/api/my/giving` · `/api/my/tax?year=` · `/api/my/tax.csv?year=` · `/api/my/receipts/:id` | patron |
 | POST | `/api/bills/:id/report` | signed in |
 | GET | `/api/admin/queue` · `/api/admin/bills/:id/document` · POST `/api/admin/bills/:id/review` | reviewer |

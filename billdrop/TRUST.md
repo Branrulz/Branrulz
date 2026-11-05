@@ -24,7 +24,9 @@ The table below shows what the prototype already enforces in code and what a rea
 | Community reports | ✅ 3 reports from different people pull a live bill back into review | |
 | Ban | ✅ "Reject & ban" suspends the account, ends its sessions and pulls its open bills | |
 | **ID verification of members** | ❌ Needed for launch | Stripe Identity or Persona. |
-| **Pay billers through real bill-pay rails** | ❌ Needed for launch | e.g. Method Financial, a bill-pay API, or a check to the biller's verified remit address. |
+| Payout queue to billers | ✅ Every gift becomes a payout record. A reviewer pays the biller and records the check number or confirmation | Pay to the biller's **official** address or portal, never one supplied by the member. |
+| **Automated biller payouts** | ❌ Needed for launch | e.g. Method Financial or another bill-pay API. |
+| **Licensed partner holding funds** | ❌ Needed for launch | Holding patrons' money before paying billers can count as money transmission. Use a licensed partner (e.g. Stripe Treasury / a bill-pay provider) and get legal sign-off. |
 
 ## 2. Protecting members' identities
 
@@ -50,7 +52,10 @@ The threat: someone joins as a patron purely to collect names, locations and acc
 | API POSTs must be JSON (blocks cross-site form CSRF) | ✅ |
 | Login / sign-up rate limit | ✅ |
 | Statement files served to reviewers only, sandboxed, `nosniff` | ✅ |
-| Card fraud (stolen cards) | ❌ Needed for launch: Stripe Radar, plus a hold period before paying billers |
+| Card payments | ✅ Stripe Payment Element (card data never touches BillDrop), test keys only; live keys refused |
+| Server-side payment verification | ✅ Gifts are recorded only after the server fetches the PaymentIntent from Stripe and checks status, amount and currency; recorded once; webhook signatures verified |
+| Over-payment races | ✅ If a bill was settled while a patron paid, the excess is refunded automatically |
+| Card fraud (stolen cards) | 🟡 Stripe Radar runs by default. **Needed:** a hold period (e.g. 7 days) before paying billers, so chargebacks land before money leaves |
 | Money laundering via fake bills | ❌ Needed for launch: patron KYC above a threshold, velocity limits, and AML review of large settlements |
 
 ## 4. Taxes: what patrons can and can't claim

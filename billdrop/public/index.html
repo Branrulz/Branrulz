@@ -187,12 +187,18 @@
       <label>Amount ($)<input name="amount" type="number" min="1" step="0.01" required></label>
       <label class="check"><input type="checkbox" name="payInFull"> Settle in full</label>
       <label class="check"><input type="checkbox" name="anonymous"> Give anonymously <small>(still counts toward your tier)</small></label>
+      <p class="pay-fee" id="pay-fee" hidden></p>
       <p class="tax-note" id="pay-tax" hidden></p>
       <label>Message <small>(optional)</small><input name="message" maxlength="280" placeholder="With compliments."></label>
+      <div class="card-step" id="card-step" hidden>
+        <span class="eyebrow">Card details</span>
+        <div id="payment-element"></div>
+        <p class="test-hint" id="test-hint" hidden>Test mode: use card <code>4242 4242 4242 4242</code>, any future date, any CVC.</p>
+      </div>
       <p class="error" hidden></p>
       <div class="actions">
         <button type="button" class="btn btn-ghost" data-close>Cancel</button>
-        <button class="btn btn-primary" type="submit">Settle</button>
+        <button class="btn btn-primary" type="submit" id="pay-submit">Settle</button>
       </div>
     </form>
   </dialog>

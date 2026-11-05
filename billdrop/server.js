@@ -22,6 +22,23 @@ const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "").split(",").map((e) => e.tr
 const COOKIE_SECURE = process.env.COOKIE_SECURE === "1";
 const AUTH_ATTEMPTS = Number(process.env.AUTH_ATTEMPTS_PER_10_MIN) || 20; // sign-ups + logins per IP
 
+// ---------- Stripe (optional) ----------
+// With STRIPE_SECRET_KEY + STRIPE_PUBLISHABLE_KEY set, patrons pay by card through Stripe's Payment
+// Element. Without them, payments are simulated. Live keys are refused unless explicitly allowed.
+const STRIPE = {
+  secret: process.env.STRIPE_SECRET_KEY || "",
+  publishable: process.env.STRIPE_PUBLISHABLE_KEY || "",
+  webhookSecret: process.env.STRIPE_WEBHOOK_SECRET || "",
+  apiBase: process.env.STRIPE_API_BASE || "https://api.stripe.com", // overridable for tests
+};
+STRIPE.enabled = Boolean(STRIPE.secret && STRIPE.publishable);
+if (STRIPE.enabled && !/^(sk|rk)_test_/.test(STRIPE.secret) && process.env.ALLOW_LIVE_PAYMENTS !== "1") {
+  throw new Error("Refusing to start with a live Stripe key. BillDrop is a prototype: use sk_test_ keys.");
+}
+// Patrons cover card processing so the biller receives the full amount (Stripe US standard pricing).
+const CARD_FEE = { percent: 0.029, fixedCents: 30 };
+const chargeFor = (amountCents) => Math.ceil((amountCents + CARD_FEE.fixedCents) / (1 - CARD_FEE.percent));
+
 const MAX_BODY = 16 * 1024;
 const MAX_UPLOAD_BODY = 6 * 1024 * 1024; // base64 of a 4 MB file fits under this
 const MAX_DOC_BYTES = 4 * 1024 * 1024;
@@ -219,13 +236,13 @@ function seed() {
   give(bills[6], duke, 940000, "With deepest sympathy.", 28);
   give(bills[7], margaux, 1850000, "Class dismissed.", 22);
 
-  return { users: [...members, duke, margaux, yacht], sessions: {}, bills };
+  return { users: [...members, duke, margaux, yacht], sessions: {}, bills, payments: {}, payouts: [] };
 }
 
 function load() {
   try {
     const data = JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
-    if (Array.isArray(data.users)) return data;
+    if (Array.isArray(data.users)) return { payments: {}, payouts: [], ...data };
     // Pre-accounts prototype data: start fresh.
   } catch (err) {
     if (err.code !== "ENOENT") throw err;
@@ -541,21 +558,216 @@ async function payBill(req, res, id) {
   const remaining = bill.amountCents - paidCents(bill);
   if (remaining <= 0) throw new HttpError(409, "This bill is already settled");
 
-  const amountCents = body.payInFull ? remaining : cents(body.amount, "Amount", { min: 100, max: remaining });
-  bill.contributions.push({
+  if (STRIPE.enabled) throw new HttpError(400, "Card payment required"); // no free settlements when Stripe is on
+  const { amountCents, anonymous, message } = parsePayment(body, remaining);
+  const c = recordContribution(user, bill, amountCents, { anonymous, message });
+  save();
+  send(res, 200, paidResponse(user, bill, c));
+}
+
+function parsePayment(body, remaining) {
+  return {
+    amountCents: body.payInFull ? remaining : cents(body.amount, "Amount", { min: 100, max: remaining }),
+    anonymous: body.anonymous === true,
+    message: assertNoPII(str(body.message, "Message", { max: 280, required: false }), "Message"),
+  };
+}
+
+function recordContribution(user, bill, amountCents, { anonymous, message, paymentId = null, feeCents = 0 }) {
+  const c = {
     id: uuid(),
     patronId: user.id,
     patronName: user.displayName,
-    anonymous: body.anonymous === true,
+    anonymous,
     amountCents,
-    message: assertNoPII(str(body.message, "Message", { max: 280, required: false }), "Message"),
+    feeCents,
+    paymentId,
+    message,
     payee: bill.biller, // funds are always routed to the biller, never the member
     createdAt: new Date().toISOString(),
+  };
+  bill.contributions.push(c);
+  // Every contribution becomes a payout owed to the biller.
+  db.payouts.push({
+    id: uuid(), billId: bill.id, contributionId: c.id, biller: bill.biller, accountLast4: bill.accountLast4,
+    amountCents, status: "queued", reference: "", createdAt: c.createdAt, sentAt: null,
   });
-  save();
+  return c;
+}
+
+function paidResponse(user, bill, c) {
   const total = givenBy(user.id);
-  const receipt = receiptView(user, bill, bill.contributions[bill.contributions.length - 1]);
-  send(res, 200, { bill: publicBill(bill), givenCents: total, tier: tierFor(total), receipt });
+  return { bill: publicBill(bill), givenCents: total, tier: tierFor(total), receipt: receiptView(user, bill, c) };
+}
+
+// ---------- Stripe payments ----------
+
+async function stripeApi(method, pathname, params, idempotencyKey) {
+  const body = params ? new URLSearchParams(params).toString() : undefined;
+  const res = await fetch(STRIPE.apiBase + pathname, {
+    method,
+    headers: {
+      Authorization: `Bearer ${STRIPE.secret}`,
+      ...(body && { "Content-Type": "application/x-www-form-urlencoded" }),
+      ...(idempotencyKey && { "Idempotency-Key": idempotencyKey }),
+    },
+    body,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    console.error("Stripe error", res.status, data?.error?.message);
+    throw new HttpError(502, "The card processor had a problem. Please try again.");
+  }
+  return data;
+}
+
+// Step 1: the patron picks an amount; we create a PaymentIntent and hand back its client secret.
+async function createPaymentIntent(req, res, id) {
+  if (!STRIPE.enabled) throw new HttpError(400, "Card payments aren't configured");
+  const user = requireUser(req, "patron");
+  rateLimit("pay:" + user.id, 30, 60 * 60000);
+  const body = await readJson(req);
+  const bill = db.bills.find((b) => b.id === id && b.status === "verified");
+  if (!bill) throw new HttpError(404, "Bill not found");
+  const remaining = bill.amountCents - paidCents(bill);
+  if (remaining <= 0) throw new HttpError(409, "This bill is already settled");
+  const { amountCents, anonymous, message } = parsePayment(body, remaining);
+  const chargeCents = chargeFor(amountCents);
+
+  const localId = uuid();
+  const pi = await stripeApi("POST", "/v1/payment_intents", {
+    amount: String(chargeCents),
+    currency: "usd",
+    "automatic_payment_methods[enabled]": "true",
+    "automatic_payment_methods[allow_redirects]": "never",
+    description: `BillDrop settlement: ${bill.title}`.slice(0, 200),
+    "metadata[billdrop_payment]": localId,
+    "metadata[bill_id]": bill.id,
+    "metadata[patron_id]": user.id,
+    "metadata[payee]": bill.biller.slice(0, 200),
+  }, localId);
+
+  db.payments[pi.id] = {
+    localId, billId: bill.id, patronId: user.id, amountCents, chargeCents, feeCents: chargeCents - amountCents,
+    anonymous, message, status: "pending", contributionId: null, refundedCents: 0, createdAt: new Date().toISOString(),
+  };
+  save();
+  send(res, 200, { paymentIntentId: pi.id, clientSecret: pi.client_secret, amountCents, chargeCents, feeCents: chargeCents - amountCents });
+}
+
+// Turns a succeeded PaymentIntent into a contribution exactly once. Called from the client after
+// confirmation and from the webhook, whichever arrives first.
+async function settlePayment(pi) {
+  const payment = db.payments[pi.id];
+  if (!payment || payment.status !== "pending") return payment;
+  if (pi.status !== "succeeded" || pi.amount !== payment.chargeCents || pi.currency !== "usd") return payment;
+  payment.status = "processing"; // guard against a concurrent second call while we talk to Stripe
+
+  const bill = db.bills.find((b) => b.id === payment.billId);
+  const user = db.users.find((u) => u.id === payment.patronId);
+  const remaining = bill && bill.status === "verified" ? Math.max(0, bill.amountCents - paidCents(bill)) : 0;
+  const apply = user ? Math.min(payment.amountCents, remaining) : 0;
+
+  // Someone else may have settled the bill while this patron was typing their card number.
+  // Refund whatever can no longer be applied (the whole charge if nothing can).
+  const refund = apply === 0 ? payment.chargeCents : payment.amountCents - apply;
+  if (refund > 0) {
+    try {
+      await stripeApi("POST", "/v1/refunds", { payment_intent: pi.id, amount: String(refund) }, `refund-${payment.localId}`);
+      payment.refundedCents = refund;
+    } catch (err) {
+      payment.status = "pending"; // try again on the next call / webhook retry
+      throw err;
+    }
+  }
+  if (apply > 0) {
+    const c = recordContribution(user, bill, apply, {
+      anonymous: payment.anonymous, message: payment.message, paymentId: pi.id, feeCents: payment.feeCents,
+    });
+    payment.contributionId = c.id;
+  }
+  payment.status = apply > 0 ? "succeeded" : "refunded";
+  save();
+  return payment;
+}
+
+// Step 2 (client): after stripe.confirmPayment succeeds in the browser, ask us to record it.
+// We never trust the browser: the PaymentIntent is fetched from Stripe and checked.
+async function confirmPayment(req, res, piId) {
+  const user = requireUser(req, "patron");
+  const payment = db.payments[piId];
+  if (!payment || payment.patronId !== user.id) throw new HttpError(404, "Payment not found");
+  if (payment.status === "pending") {
+    const pi = await stripeApi("GET", `/v1/payment_intents/${encodeURIComponent(piId)}`);
+    await settlePayment(pi);
+  }
+  if (payment.status === "pending" || payment.status === "processing") throw new HttpError(409, "Payment hasn't completed yet");
+  const bill = db.bills.find((b) => b.id === payment.billId);
+  if (payment.status === "refunded") {
+    return send(res, 200, { refunded: true, refundedCents: payment.refundedCents, bill: bill && publicBill(bill) });
+  }
+  const c = bill.contributions.find((x) => x.id === payment.contributionId);
+  send(res, 200, { ...paidResponse(user, bill, c), refundedCents: payment.refundedCents });
+}
+
+// Stripe webhook: the source of truth if the browser closes before step 2.
+function readRaw(req, limit = 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = []; let size = 0;
+    req.on("data", (c) => { size += c.length; if (size > limit) { reject(new HttpError(413, "Too large")); req.destroy(); } else chunks.push(c); });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+function verifyStripeSignature(raw, header, secret, toleranceSec = 300) {
+  const parts = Object.fromEntries(String(header || "").split(",").map((kv) => kv.split("=")).filter((p) => p.length === 2).map(([k, v]) => [k, v]));
+  const sigs = String(header || "").split(",").filter((p) => p.startsWith("v1=")).map((p) => p.slice(3));
+  const t = Number(parts.t);
+  if (!t || !sigs.length) return false;
+  if (Math.abs(Date.now() / 1000 - t) > toleranceSec) return false;
+  const expected = crypto.createHmac("sha256", secret).update(`${t}.`).update(raw).digest();
+  return sigs.some((s) => {
+    const got = Buffer.from(s, "hex");
+    return got.length === expected.length && crypto.timingSafeEqual(got, expected);
+  });
+}
+
+async function stripeWebhook(req, res) {
+  if (!STRIPE.enabled || !STRIPE.webhookSecret) throw new HttpError(404, "Not found");
+  const raw = await readRaw(req);
+  if (!verifyStripeSignature(raw, req.headers["stripe-signature"], STRIPE.webhookSecret)) {
+    throw new HttpError(400, "Bad signature");
+  }
+  const event = JSON.parse(raw.toString("utf8"));
+  if (event.type === "payment_intent.succeeded") await settlePayment(event.data.object);
+  if (event.type === "payment_intent.payment_failed" || event.type === "payment_intent.canceled") {
+    const p = db.payments[event.data.object.id];
+    if (p && p.status === "pending") { p.status = "failed"; save(); }
+  }
+  send(res, 200, { received: true });
+}
+
+// ---------- reviewer: payouts owed to billers ----------
+
+function listPayouts(req) {
+  requireUser(req, "admin");
+  return db.payouts.slice().sort((a, b) => (a.status === "queued" ? 0 : 1) - (b.status === "queued" ? 0 : 1) || b.createdAt.localeCompare(a.createdAt))
+    .slice(0, 200).map((p) => ({ ...p, billTitle: db.bills.find((b) => b.id === p.billId)?.title || "" }));
+}
+
+async function markPayoutSent(req, res, id) {
+  const admin = requireUser(req, "admin");
+  const body = await readJson(req);
+  const p = db.payouts.find((x) => x.id === id);
+  if (!p) throw new HttpError(404, "Payout not found");
+  if (p.status !== "queued") throw new HttpError(409, "Already marked as sent");
+  p.reference = str(body.reference, "Payment reference (check no. or confirmation)", { min: 3, max: 80 });
+  p.status = "sent";
+  p.sentAt = new Date().toISOString();
+  p.sentBy = admin.id;
+  save();
+  send(res, 200, p);
 }
 
 async function reportBill(req, res, id) {
@@ -644,6 +856,8 @@ function receiptView(user, bill, c) {
     receiptNo: receiptNo(c),
     date: c.createdAt,
     amountCents: c.amountCents,
+    feeCents: c.feeCents || 0,
+    paidByCard: Boolean(c.paymentId),
     payer: { name: user.displayName, email: user.email },
     payee: c.payee,
     onBehalfOf: `${bill.name}${bill.city ? ", " + bill.city : ""}`,
@@ -803,6 +1017,13 @@ async function api(req, res, url) {
   if (m === "GET" && p === "/api/categories") return send(res, 200, CATEGORIES);
   if (m === "GET" && p === "/api/stats") return send(res, 200, stats());
   if (m === "GET" && p === "/api/policy") return send(res, 200, POLICY);
+  if (m === "GET" && p === "/api/config") {
+    return send(res, 200, { payments: STRIPE.enabled ? { mode: "stripe", publishableKey: STRIPE.publishable } : { mode: "simulated" }, cardFee: CARD_FEE });
+  }
+  if (m === "POST" && p === "/api/stripe/webhook") return stripeWebhook(req, res);
+  if ((match = p.match(/^\/api\/payments\/([\w-]+)\/confirm$/)) && m === "POST") return confirmPayment(req, res, match[1]);
+  if (m === "GET" && p === "/api/admin/payouts") return send(res, 200, listPayouts(req));
+  if ((match = p.match(/^\/api\/admin\/payouts\/([\w-]+)\/sent$/)) && m === "POST") return markPayoutSent(req, res, match[1]);
 
   if (m === "POST" && p === "/api/auth/signup") return signup(req, res);
   if (m === "POST" && p === "/api/auth/login") return login(req, res);
@@ -825,6 +1046,7 @@ async function api(req, res, url) {
   if ((match = p.match(/^\/api\/bills\/([\w-]+)\/pay$/)) && m === "POST") return payBill(req, res, match[1]);
   if ((match = p.match(/^\/api\/bills\/([\w-]+)\/report$/)) && m === "POST") return reportBill(req, res, match[1]);
   if ((match = p.match(/^\/api\/bills\/([\w-]+)\/pass$/)) && m === "POST") return passBill(req, res, match[1]);
+  if ((match = p.match(/^\/api\/bills\/([\w-]+)\/payment-intent$/)) && m === "POST") return createPaymentIntent(req, res, match[1]);
   if (m === "GET" && p === "/api/deck") {
     rateLimit("feed:" + clientIp(req), 120, 60000);
     return send(res, 200, deck(req));
@@ -888,7 +1110,8 @@ if (require.main === module) {
   server.listen(PORT, () => {
     console.log(`BillDrop running at http://localhost:${PORT}`);
     if (!ADMIN_EMAILS.length) console.log("Tip: set ADMIN_EMAILS=you@example.com to get a reviewer account when you sign up with that email.");
+    console.log(STRIPE.enabled ? "Payments: Stripe TEST mode" : "Payments: simulated (set STRIPE_SECRET_KEY + STRIPE_PUBLISHABLE_KEY for Stripe test mode)");
   });
 }
 
-module.exports = { server, POLICY, TIERS };
+module.exports = { server, POLICY, TIERS, chargeFor };
