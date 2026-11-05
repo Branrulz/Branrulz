@@ -39,11 +39,11 @@ const CATEGORIES = ["medical", "rent", "student-loan", "credit-card", "utilities
 
 const TIERS = [
   { id: "patron", name: "Patron", minCents: 0 },
-  { id: "bronze", name: "Bronze", minCents: 100_00 },
-  { id: "silver", name: "Silver", minCents: 1_000_00 },
-  { id: "gold", name: "Gold", minCents: 5_000_00 },
-  { id: "platinum", name: "Platinum", minCents: 25_000_00 },
-  { id: "black", name: "Black Card", minCents: 100_000_00 },
+  { id: "bronze", name: "Bronze", minCents: 1_000_00 },
+  { id: "silver", name: "Silver", minCents: 10_000_00 },
+  { id: "gold", name: "Gold", minCents: 50_000_00 },
+  { id: "platinum", name: "Platinum", minCents: 250_000_00 },
+  { id: "black", name: "Black Card", minCents: 1_000_000_00 },
 ];
 
 // Gift-tax figures used on patron paperwork. Not tax advice; update each year from the IRS.

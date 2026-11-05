@@ -77,7 +77,7 @@ test("bills stay hidden until a reviewer approves them, then patrons can settle 
   const patron = await signup("patron", "Mr. Moneybags");
   const admin = await signup("patron", "Reviewer", "admin@test.dev"); // email in ADMIN_EMAILS -> admin
 
-  const { status, data: bill } = await member("POST", "/bills", billBody({ amount: "1200" }));
+  const { status, data: bill } = await member("POST", "/bills", billBody({ amount: "12000" }));
   assert.equal(status, 201);
   assert.equal(bill.status, "pending");
   assert.equal(bill.name, "Lena", "only first name is stored for display");
@@ -96,12 +96,12 @@ test("bills stay hidden until a reviewer approves them, then patrons can settle 
   assert.equal((await admin("POST", `/admin/bills/${bill.id}/review`, { decision: "approve" })).status, 200);
   assert.equal((await admin("GET", `/admin/bills/${bill.id}/document`)).status, 404, "statement deleted after review");
 
-  const r1 = await patron("POST", `/bills/${bill.id}/pay`, { amount: 150 });
+  const r1 = await patron("POST", `/bills/${bill.id}/pay`, { amount: 1500 });
   assert.equal(r1.data.tier.id, "bronze");
   assert.equal(r1.data.bill.contributions[0].payee, "Smile Dental");
   const r2 = await patron("POST", `/bills/${bill.id}/pay`, { payInFull: true, anonymous: true });
   assert.equal(r2.data.bill.paidOff, true);
-  assert.equal(r2.data.tier.id, "silver");
+  assert.equal(r2.data.tier.id, "silver"); // $12,000 lifetime
   assert.equal(r2.data.bill.contributions[1].patron, "Anonymous");
   assert.equal((await patron("POST", `/bills/${bill.id}/pay`, { payInFull: true })).status, 409);
 

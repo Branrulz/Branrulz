@@ -41,11 +41,11 @@ No dependencies, just Node 18+. Data lives in `billdrop/data/` (created and seed
   | Tier | Lifetime giving |
   | --- | --- |
   | Patron | starting tier |
-  | Bronze | $100+ |
-  | Silver | $1,000+ |
-  | Gold | $5,000+ |
-  | Platinum | $25,000+ |
-  | Black Card | $100,000+ |
+  | Bronze | $1,000+ |
+  | Silver | $10,000+ |
+  | Gold | $50,000+ |
+  | Platinum | $250,000+ |
+  | Black Card | $1,000,000+ |
 
   Shown as a membership card, chips on the leaderboard, and progress to the next tier.
 - **Paperwork, handled**: a receipt for every payment, an annual statement, a CSV for the accountant, and a live gift-tax note before paying.
