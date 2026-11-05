@@ -570,6 +570,33 @@ async function reportBill(req, res, id) {
   send(res, 200, { ok: true });
 }
 
+// ---------- API: the deck (swipe to settle or pass) ----------
+
+// Open, verified bills this patron hasn't passed on. Most urgent first, then newest.
+function deck(req) {
+  const user = currentUser(req);
+  const passed = new Set(user?.passed || []);
+  return db.bills
+    .filter((b) => b.status === "verified" && !isPaidOff(b) && !passed.has(b.id))
+    .map(publicBill)
+    .sort((a, b) => (a.dueDate || "9999").localeCompare(b.dueDate || "9999") || b.createdAt.localeCompare(a.createdAt));
+}
+
+async function passBill(req, res, id) {
+  const user = requireUser(req, "patron");
+  if (!db.bills.some((b) => b.id === id && b.status === "verified")) throw new HttpError(404, "Bill not found");
+  user.passed = [...new Set([...(user.passed || []), id])].slice(-5000);
+  save();
+  send(res, 200, { ok: true });
+}
+
+function resetDeck(req, res) {
+  const user = requireUser(req, "patron");
+  user.passed = [];
+  save();
+  send(res, 200, { ok: true });
+}
+
 // ---------- API: dashboards ----------
 
 function myBills(req) {
@@ -693,6 +720,12 @@ async function api(req, res, url) {
   }
   if ((match = p.match(/^\/api\/bills\/([\w-]+)\/pay$/)) && m === "POST") return payBill(req, res, match[1]);
   if ((match = p.match(/^\/api\/bills\/([\w-]+)\/report$/)) && m === "POST") return reportBill(req, res, match[1]);
+  if ((match = p.match(/^\/api\/bills\/([\w-]+)\/pass$/)) && m === "POST") return passBill(req, res, match[1]);
+  if (m === "GET" && p === "/api/deck") {
+    rateLimit("feed:" + clientIp(req), 120, 60000);
+    return send(res, 200, deck(req));
+  }
+  if (m === "POST" && p === "/api/deck/reset") return resetDeck(req, res);
 
   if (m === "GET" && p === "/api/my/bills") return send(res, 200, myBills(req));
   if (m === "GET" && p === "/api/my/giving") return send(res, 200, myGiving(req));

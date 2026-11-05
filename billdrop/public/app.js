@@ -60,12 +60,14 @@ function renderNav() {
   const me = state.me;
   let html = "";
   if (!me) {
-    html = `<button class="btn btn-link" data-auth="signin">Sign in</button>
-            <button class="btn btn-ghost" data-auth="join">Request membership</button>`;
+    html = `<a class="btn btn-link" href="#/deck">The Deck</a>
+            <button class="btn btn-link" data-auth="signin">Sign in</button>
+            <button class="btn btn-ghost" data-auth="join">Join</button>`;
   } else {
     const where = me.role === "admin" ? `<a class="btn btn-link" href="#/review">Review queue</a>`
       : `<a class="btn btn-link" href="#/ledger">${me.role === "patron" ? "My standing" : "My bills"}</a>`;
     html = `<span class="who-am-i">${esc(me.displayName)} ${me.role === "patron" ? tierChip(me.tier.id) : ""}</span>
+            ${me.role === "patron" ? `<a class="btn btn-link" href="#/deck">The Deck</a>` : ""}
             ${where}
             ${me.role === "member" ? `<button class="btn btn-ghost" data-action="submit-bill">Submit a bill</button>` : ""}
             <button class="btn btn-link" data-action="logout">Sign out</button>`;
@@ -73,11 +75,12 @@ function renderNav() {
   $("#nav-actions").innerHTML = html;
 
   $("#hero-ctas").innerHTML = !me
-    ? `<button class="btn btn-primary" data-auth="join" data-role="patron">Become a patron</button>
+    ? `<a class="btn btn-primary" href="#/deck">Open the Deck</a>
+       <button class="btn btn-ghost" data-auth="join" data-role="patron">Become a patron</button>
        <button class="btn btn-ghost" data-auth="join" data-role="member">I have a bill</button>`
     : me.role === "member"
       ? `<button class="btn btn-primary" data-action="submit-bill">Submit a bill</button>`
-      : "";
+      : me.role === "patron" ? `<a class="btn btn-primary" href="#/deck">Open the Deck</a>` : "";
 }
 
 // ---------- feed ----------
@@ -260,13 +263,15 @@ async function renderReview(el) {
 
 async function route() {
   const r = location.hash.replace(/^#/, "") || "/";
-  const views = { "/": "view-feed", "/ledger": "view-ledger", "/review": "view-review" };
+  const views = { "/": "view-feed", "/deck": "view-deck", "/ledger": "view-ledger", "/review": "view-review" };
   let view = views[r] || "view-feed";
-  if (view !== "view-feed" && !state.me) view = "view-feed";
+  if ((view === "view-ledger" || view === "view-review") && !state.me) view = "view-feed";
+  if (view === "view-deck" && state.me && !isRole("patron")) view = "view-feed";
   $$(".view").forEach((v) => (v.hidden = v.id !== view));
   window.scrollTo(0, 0);
   try {
     if (view === "view-feed") await refreshFeed();
+    if (view === "view-deck") await loadDeck();
     if (view === "view-ledger") {
       if (isRole("admin")) return void (location.hash = "#/review");
       await (isRole("patron") ? renderPatronLedger : renderMemberLedger)($("#view-ledger"));
@@ -327,7 +332,7 @@ authForm.addEventListener("submit", async (e) => {
 // ---------- global clicks ----------
 
 document.addEventListener("click", async (e) => {
-  const t = e.target.closest("[data-auth],[data-action],[data-close],[data-pay],[data-report],[data-decision]");
+  const t = e.target.closest("[data-auth],[data-action],[data-close],[data-pay],[data-report],[data-decision],[data-swipe]");
   if (!t) return;
 
   if (t.dataset.auth) return openAuth(t.dataset.auth, t.dataset.role);
@@ -342,6 +347,11 @@ document.addEventListener("click", async (e) => {
     return toast("You've signed out.");
   }
   if (t.dataset.action === "submit-bill") return openPost();
+  if (t.dataset.swipe) return swipe(t.dataset.swipe);
+  if (t.dataset.action === "reset-deck") {
+    await api("/deck/reset", { method: "POST", body: {} });
+    return loadDeck();
+  }
   if (t.dataset.pay) return openPay(t.dataset.pay);
   if (t.dataset.report) return openReport(t.dataset.report);
   if (t.dataset.decision) return decide(t);
@@ -401,7 +411,7 @@ const payForm = $("#pay-form");
 function openPay(id) {
   if (!state.me) return openAuth("join", "patron");
   if (!isRole("patron")) return;
-  const bill = state.bills.find((b) => b.id === id);
+  const bill = findBill(id);
   if (!bill) return;
   payingId = bill.id;
   payForm.reset();
@@ -415,7 +425,7 @@ function openPay(id) {
 }
 
 payForm.payInFull.addEventListener("change", () => {
-  const bill = state.bills.find((b) => b.id === payingId);
+  const bill = findBill(payingId);
   payForm.amount.disabled = payForm.payInFull.checked;
   if (payForm.payInFull.checked && bill) payForm.amount.value = (bill.remainingCents / 100).toFixed(2);
 });
@@ -433,8 +443,129 @@ payForm.addEventListener("submit", async (e) => {
     renderNav();
     if (res.tier.id !== before) toast(`You've risen to ${res.tier.name}. The Circle takes note.`);
     else toast(res.bill.paidOff ? "Account settled. Most generous." : `Received with gratitude. ${money(res.bill.remainingCents)} remains.`);
-    refreshFeed();
+    if (deckPending === payingId) { deckPending = null; state.deck.shift(); renderDeck(); }
+    else refreshFeed();
   } catch (err) { showError(payForm, err.message); }
+});
+
+// ---------- the deck (swipe to settle or pass) ----------
+
+state.deck = [];
+let deckPending = null; // bill id waiting on the settle confirmation
+const findBill = (id) => state.bills.find((b) => b.id === id) || state.deck.find((b) => b.id === id);
+
+async function loadDeck() {
+  state.deck = await api("/deck");
+  if (!state.tiers.length) state.tiers = (await api("/stats")).tiers;
+  renderDeck();
+}
+
+function deckCard(b, i) {
+  const pct = Math.min(100, Math.round((b.paidCents / b.amountCents) * 100));
+  return `
+    <article class="deck-card" data-id="${esc(b.id)}" data-i="${i}" style="--i:${i}" ${i ? 'aria-hidden="true"' : ""}>
+      <span class="deck-stamp deck-stamp-settle">Settle</span>
+      <span class="deck-stamp deck-stamp-pass">Pass</span>
+      <div class="bill-head">
+        <span class="cat">${esc(label(b.category))} <span class="verified">✓ Verified</span></span>
+        ${due(b.dueDate)}
+      </div>
+      <h2>${esc(b.title)}</h2>
+      <p class="who">${esc(b.name)}${b.city ? " · " + esc(b.city) : ""} · ${ago(b.createdAt)}</p>
+      <p class="deck-story">${esc(b.story)}</p>
+      <div class="deck-amount">
+        <span class="eyebrow">Outstanding</span>
+        <strong>${money(b.remainingCents)}</strong>
+        <span class="muted-line">Paid directly to ${esc(b.biller)}${b.paidCents ? ` · ${money(b.paidCents)} already given` : ""}</span>
+      </div>
+      <div class="progress"><span style="width:${pct}%"></span></div>
+    </article>`;
+}
+
+function renderDeck() {
+  const el = $("#deck");
+  const top = state.deck.slice(0, 3);
+  $("#deck-actions").hidden = !top.length;
+  $("#deck-count").textContent = state.deck.length ? `${state.deck.length} open account${state.deck.length === 1 ? "" : "s"}` : "";
+  if (!top.length) {
+    el.innerHTML = `<div class="deck-empty">
+      <p class="empty">You've seen every open account.</p>
+      ${isRole("patron") ? `<button class="btn btn-ghost" data-action="reset-deck">Revisit the ones I passed</button>` : ""}
+      <a class="btn btn-link" href="#/">Back to the ledger</a></div>`;
+    return;
+  }
+  el.innerHTML = top.map(deckCard).reverse().join(""); // last in DOM = on top
+  attachDrag($('.deck-card[data-i="0"]', el));
+}
+
+// Pointer-driven drag on the top card.
+function attachDrag(card) {
+  let startX = 0, startY = 0, dx = 0, dy = 0, dragging = false, t0 = 0;
+  card.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    dragging = true; startX = e.clientX; startY = e.clientY; dx = dy = 0; t0 = performance.now();
+    card.setPointerCapture(e.pointerId);
+    card.classList.add("dragging");
+  });
+  card.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    dx = e.clientX - startX; dy = e.clientY - startY;
+    card.style.transform = `translate(${dx}px, ${dy * 0.3}px) rotate(${dx / 18}deg)`;
+    card.style.setProperty("--settle", Math.max(0, Math.min(1, dx / 110)));
+    card.style.setProperty("--pass", Math.max(0, Math.min(1, -dx / 110)));
+  });
+  const end = () => {
+    if (!dragging) return;
+    dragging = false;
+    card.classList.remove("dragging");
+    const fast = Math.abs(dx) / (performance.now() - t0) > 0.6 && Math.abs(dx) > 40;
+    if (dx > 110 || (fast && dx > 0)) swipe("right");
+    else if (dx < -110 || (fast && dx < 0)) swipe("left");
+    else { card.style.transform = ""; card.style.setProperty("--settle", 0); card.style.setProperty("--pass", 0); }
+  };
+  card.addEventListener("pointerup", end);
+  card.addEventListener("pointercancel", end);
+}
+
+function flyOut(card, dir) {
+  return new Promise((resolve) => {
+    card.classList.add("leaving");
+    card.style.setProperty(dir === "right" ? "--settle" : "--pass", 1);
+    card.style.transform = `translate(${dir === "right" ? 140 : -140}vw, 40px) rotate(${dir === "right" ? 30 : -30}deg)`;
+    setTimeout(resolve, 280);
+  });
+}
+
+async function swipe(dir) {
+  const card = $('#deck .deck-card[data-i="0"]');
+  const bill = state.deck[0];
+  if (!card || !bill || card.classList.contains("leaving")) return;
+
+  if (dir === "left") {
+    await flyOut(card, "left");
+    state.deck.shift();
+    renderDeck();
+    if (isRole("patron")) api(`/bills/${bill.id}/pass`, { method: "POST", body: {} }).catch(() => {});
+    return;
+  }
+  // Right: confirm before any money moves.
+  if (!state.me) { renderDeck(); return openAuth("join", "patron"); }
+  await flyOut(card, "right");
+  deckPending = bill.id;
+  openPay(bill.id);
+  payForm.payInFull.checked = true;
+  payForm.payInFull.dispatchEvent(new Event("change"));
+}
+
+// Cancelling the settle sheet puts the card back on top of the deck.
+$("#pay-dialog").addEventListener("close", () => {
+  if (deckPending && state.deck[0]?.id === deckPending) { deckPending = null; renderDeck(); }
+});
+
+document.addEventListener("keydown", (e) => {
+  if ($("#view-deck").hidden || document.querySelector("dialog[open]")) return;
+  if (e.key === "ArrowRight") swipe("right");
+  if (e.key === "ArrowLeft") swipe("left");
 });
 
 // ---------- report ----------

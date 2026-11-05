@@ -84,6 +84,21 @@
     </main>
   </div>
 
+  <!-- ===== The Deck (swipe) ===== -->
+  <main id="view-deck" class="view wrap deck-page" hidden>
+    <div class="deck-head">
+      <span class="eyebrow">The Deck</span>
+      <h1 class="page-title">Settle, or pass.</h1>
+      <p class="deck-hint">Swipe right to settle · left to pass · or use ← →</p>
+    </div>
+    <div class="deck" id="deck" aria-live="polite"></div>
+    <div class="deck-actions" id="deck-actions">
+      <button class="deck-btn deck-pass" data-swipe="left" aria-label="Pass">✕</button>
+      <span class="deck-count" id="deck-count"></span>
+      <button class="deck-btn deck-settle" data-swipe="right" aria-label="Settle">✓</button>
+    </div>
+  </main>
+
   <!-- ===== Member / patron dashboard ===== -->
   <main id="view-ledger" class="view wrap page" hidden></main>
 

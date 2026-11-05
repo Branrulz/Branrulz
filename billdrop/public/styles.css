@@ -193,6 +193,58 @@ label.check input { width: 16px; height: 16px; accent-color: var(--gold); }
   padding: 14px 24px; border-radius: var(--radius); font-family: var(--serif); font-size: 1.15rem; font-style: italic;
   box-shadow: 0 12px 40px rgba(0,0,0,.6); max-width: calc(100vw - 32px); text-align: center; }
 
+/* ---------- the deck ---------- */
+.deck-page { padding-top: 32px; padding-bottom: 48px; display: flex; flex-direction: column; align-items: center; text-align: center; }
+.deck-head .page-title { margin: 6px 0 4px; }
+.deck-hint { color: var(--muted); font-size: .8rem; margin: 0 0 22px; }
+@media (pointer: coarse) { .deck-hint { font-size: 0; } .deck-hint::after { content: "Swipe right to settle · left to pass"; font-size: .8rem; } }
+.deck { position: relative; width: min(420px, 100%); height: 520px; }
+.deck-card {
+  position: absolute; inset: 0; display: flex; flex-direction: column; text-align: left; padding: 26px 24px 24px;
+  background: linear-gradient(180deg, #211d16, var(--surface)); border: 1px solid var(--hairline-strong); border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0,0,0,.6); touch-action: pan-y; user-select: none; cursor: grab;
+  transform: translateY(calc(var(--i) * 12px)) scale(calc(1 - var(--i) * .04));
+  transition: transform .28s cubic-bezier(.2,.8,.2,1), opacity .28s;
+  --settle: 0; --pass: 0;
+}
+.deck-card:not([data-i="0"]) { pointer-events: none; filter: brightness(.7); }
+.deck-card.dragging { transition: none; cursor: grabbing; }
+.deck-card.leaving { opacity: 0; pointer-events: none; }
+.deck-card h2 { font-size: 2rem; margin-top: 4px; }
+.deck-story { flex: 1; overflow: hidden; color: #d8d0bd; font-size: 1rem; margin: 6px 0 14px;
+  display: -webkit-box; -webkit-line-clamp: 7; -webkit-box-orient: vertical; }
+.deck-amount { margin-bottom: 14px; }
+.deck-amount strong { display: block; font-family: var(--serif); font-weight: 500; font-size: 3rem; line-height: 1.05; color: var(--gold-light); margin: 2px 0 4px; }
+.deck-stamp { position: absolute; top: 26px; padding: 4px 14px; font: italic 600 1.8rem var(--serif); border: 2px solid; border-radius: 4px; pointer-events: none; z-index: 2; }
+.deck-stamp-settle { left: 22px; color: var(--gold-light); border-color: var(--gold); transform: rotate(-12deg); opacity: var(--settle); background: rgba(11,10,8,.75); }
+.deck-stamp-pass { right: 22px; color: var(--danger); border-color: var(--danger); transform: rotate(12deg); opacity: var(--pass); background: rgba(11,10,8,.75); }
+.deck-actions { display: flex; align-items: center; justify-content: center; gap: 28px; margin-top: 34px; }
+.deck-btn { width: 68px; height: 68px; border-radius: 50%; font-size: 1.6rem; cursor: pointer; background: var(--surface); transition: transform .15s, box-shadow .2s, background .2s; }
+.deck-btn:hover { transform: scale(1.07); }
+.deck-btn:active { transform: scale(.95); }
+.deck-pass { color: var(--danger); border: 1px solid rgba(224,122,106,.5); }
+.deck-pass:hover { background: rgba(224,122,106,.1); }
+.deck-settle { color: var(--ink); border: 0; background: var(--gold-grad); box-shadow: 0 8px 28px rgba(201,169,97,.3); }
+.deck-count { min-width: 120px; font-size: .66rem; letter-spacing: .2em; text-transform: uppercase; color: var(--muted); }
+.deck-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  border: 1px dashed var(--hairline-strong); border-radius: 14px; }
+.deck-empty .empty { padding: 0; }
+@media (max-width: 480px) { .deck { height: 480px; } .deck-card h2 { font-size: 1.7rem; } .deck-amount strong { font-size: 2.5rem; } .deck-actions { gap: 18px; } }
+@media (prefers-reduced-motion: reduce) { .deck-card { transition: none; } }
+@media (max-width: 600px) {
+  .topbar { padding: 10px 0; }
+  .logo-mark { font-size: 1.4rem; }
+  nav { flex-wrap: nowrap; }
+  .nav-actions { flex-wrap: nowrap; gap: 2px; }
+  .nav-actions .btn { padding: 8px 7px; font-size: .6rem; letter-spacing: .12em; }
+  .deck-page { padding-top: 14px; padding-bottom: 24px; }
+  .deck-head .page-title { font-size: 1.8rem; }
+  .deck-hint { margin-bottom: 14px; }
+  .deck { height: max(300px, calc(100svh - 320px)); }
+  .deck-actions { margin-top: 18px; }
+  .deck-btn { width: 60px; height: 60px; }
+}
+
 /* ---------- trust markers ---------- */
 .verified { color: #9fc79a; letter-spacing: .1em; margin-left: 6px; }
 .patrons-only { margin: 18px 0 0; text-align: center; font-size: .7rem; letter-spacing: .2em; text-transform: uppercase; color: var(--muted); }

@@ -170,3 +170,16 @@ test("rejects non-JSON POSTs (CSRF guard) and bad logins", async () => {
   assert.equal(res.status, 415);
   assert.equal((await client()("POST", "/auth/login", { email: "nobody@test.dev", password: "whatever123" })).status, 401);
 });
+
+test("the deck: patrons can pass on a bill and it stays gone until they reset", async () => {
+  const patron = await signup("patron");
+  const first = (await patron("GET", "/deck")).data;
+  assert.ok(first.length > 1);
+  assert.ok(first.every((b) => !b.paidOff && b.verified));
+  assert.equal((await patron("POST", `/bills/${first[0].id}/pass`, {})).status, 200);
+  const after = (await patron("GET", "/deck")).data;
+  assert.ok(!after.some((b) => b.id === first[0].id));
+  assert.equal((await client()("POST", `/bills/${first[0].id}/pass`, {})).status, 401);
+  await patron("POST", "/deck/reset", {});
+  assert.equal((await patron("GET", "/deck")).data.length, first.length);
+});
